@@ -13,7 +13,7 @@ use crate::{agent::Agent, tools::Tools};
 #[derive(Parser)]
 #[command(
     version,
-    about = "A minimal DeepSeek agent with streaming, built-in and MCP tools"
+    about = "A minimal agent harness with streaming, built-in and MCP tools"
 )]
 pub struct Cli {
     #[arg(

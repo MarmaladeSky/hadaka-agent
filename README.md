@@ -1,6 +1,6 @@
 # hadaka-agent
 
-A small Rust agent harness for DeepSeek, inspired by [Tiny Agents](https://huggingface.co/blog/tiny-agents). One loop streams a model response, executes its tool calls, appends the results, and repeats until the model answers without tools.
+A small Rust agent harness, inspired by [Tiny Agents](https://huggingface.co/blog/tiny-agents). One loop streams a model response, executes its tool calls, appends the results, and repeats until the model answers without tools.
 
 ## Run
 

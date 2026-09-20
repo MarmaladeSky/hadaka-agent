@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
     collections::HashSet,
     fs::{self, OpenOptions},
@@ -61,7 +63,11 @@ pub fn create_if_missing(path: &Path) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("cannot create config directory {}", parent.display()))?;
     }
-    match OpenOptions::new().write(true).create_new(true).open(path) {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    match options.open(path) {
         Ok(mut file) => file
             .write_all(include_bytes!("../agent.example.toml"))
             .with_context(|| format!("cannot write config {}", path.display())),
@@ -136,6 +142,17 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn creates_config_file_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        create_if_missing(&path).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 
     #[test]
     fn accepts_the_complete_example() {
