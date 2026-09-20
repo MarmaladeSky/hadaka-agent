@@ -393,6 +393,7 @@ async fn mcp_discovers_pages_routes_calls_and_reaps_subprocess() {
         [
             "echo",
             "read_file",
+            "text_editor",
             "mcp_fixture__echo",
             "mcp_fixture__second"
         ]

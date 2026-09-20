@@ -16,10 +16,18 @@ struct Arguments {
     limit: usize,
 }
 
-pub(super) fn definition() -> Value {
-    super::definition(
-        "read_file",
-        "Read a UTF-8 text file. Relative paths resolve from the working directory. offset is zero-based and limit is measured in lines (1–1000). Returns numbered text, total_lines, has_more, and next_offset (null at EOF). Files must be regular files of at most 1 MiB; output is capped at 64 KiB of numbered text, on whole-line boundaries. Binary files are unsupported.",
+use super::{BoxFuture, Tool};
+
+pub(super) struct ReadFile;
+
+impl Tool for ReadFile {
+    fn name(&self) -> &str {
+        "read_file"
+    }
+    fn description(&self) -> &str {
+        "Read a UTF-8 text file. Relative paths resolve from the working directory. offset is zero-based and limit is measured in lines (1–1000). Returns numbered text, total_lines, has_more, and next_offset (null at EOF). Files must be regular files of at most 1 MiB; output is capped at 64 KiB of numbered text, on whole-line boundaries. Binary files are unsupported."
+    }
+    fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
@@ -29,21 +37,23 @@ pub(super) fn definition() -> Value {
             },
             "required": ["path", "offset", "limit"],
             "additionalProperties": false
-        }),
-    )
-}
-
-pub(super) async fn call(arguments: Value) -> Result<String> {
-    let args: Arguments = serde_json::from_value(arguments)
-        .context("read_file expects path (string), offset and limit (nonnegative integers)")?;
-    ensure!(!args.path.trim().is_empty(), "path must not be empty");
-    ensure!(
-        (1..=MAX_LINES).contains(&args.limit),
-        "limit must be between 1 and {MAX_LINES}"
-    );
-    tokio::task::spawn_blocking(move || read(args))
-        .await
-        .context("file reader failed")?
+        })
+    }
+    fn call(&self, arguments: Value) -> BoxFuture<'_, Result<String>> {
+        Box::pin(async move {
+            let args: Arguments = serde_json::from_value(arguments).context(
+                "read_file expects path (string), offset and limit (nonnegative integers)",
+            )?;
+            ensure!(!args.path.trim().is_empty(), "path must not be empty");
+            ensure!(
+                (1..=MAX_LINES).contains(&args.limit),
+                "limit must be between 1 and {MAX_LINES}"
+            );
+            tokio::task::spawn_blocking(move || read(args))
+                .await
+                .context("file reader failed")?
+        })
+    }
 }
 
 fn read(args: Arguments) -> Result<String> {
@@ -102,7 +112,8 @@ mod tests {
         let path = dir.path().join("text");
         std::fs::write(&path, "hello\r\n世界\r\n\r\nlast").unwrap();
         let result: Value = serde_json::from_str(
-            &call(json!({"path": path, "offset": 1, "limit": 2}))
+            &ReadFile
+                .call(json!({"path": path, "offset": 1, "limit": 2}))
                 .await
                 .unwrap(),
         )
@@ -112,7 +123,8 @@ mod tests {
         assert_eq!(result["has_more"], true);
         for offset in [4, usize::MAX] {
             let result: Value = serde_json::from_str(
-                &call(json!({"path": path, "offset": offset, "limit": 2}))
+                &ReadFile
+                    .call(json!({"path": path, "offset": offset, "limit": 2}))
                     .await
                     .unwrap(),
             )
@@ -135,7 +147,7 @@ mod tests {
             json!({"path": path, "offset": 0, "limit": 1}),
             json!({"path": dir.path(), "offset": 0, "limit": 1}),
         ] {
-            assert!(call(args).await.is_err());
+            assert!(ReadFile.call(args).await.is_err());
         }
         for bytes in [
             vec![0],
@@ -145,7 +157,8 @@ mod tests {
         ] {
             std::fs::write(&path, bytes).unwrap();
             assert!(
-                call(json!({"path": path, "offset": 0, "limit": 1}))
+                ReadFile
+                    .call(json!({"path": path, "offset": 0, "limit": 1}))
                     .await
                     .is_err()
             );
@@ -158,7 +171,8 @@ mod tests {
         let path = dir.path().join("text");
         std::fs::write(&path, format!("{}\n", "a".repeat(40000)).repeat(2)).unwrap();
         let result: Value = serde_json::from_str(
-            &call(json!({"path": path, "offset": 0, "limit": 2}))
+            &ReadFile
+                .call(json!({"path": path, "offset": 0, "limit": 2}))
                 .await
                 .unwrap(),
         )

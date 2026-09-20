@@ -4,9 +4,8 @@ use anyhow::{Context, Result, bail, ensure};
 use rmcp::{
     RoleClient, ServiceExt,
     model::{CallToolRequestParams, CallToolResult, ContentBlock, ResourceContents},
-    service::RunningService,
+    service::{Peer, RunningService},
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{
     process::{Child, Command},
@@ -23,38 +22,94 @@ struct Session {
     client: Option<RunningService<RoleClient, ()>>,
 }
 
-enum Route {
-    Echo,
-    ReadFile,
-    Mcp { session: usize, name: String },
+mod echo;
+mod read_file;
+mod text_editor;
+
+use futures_util::future::BoxFuture;
+
+/// A callable tool with its model-facing metadata and JSON arguments.
+/// Implementations validate their arguments and return text or an error.
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    fn parameters(&self) -> Value;
+    fn call(&self, arguments: Value) -> BoxFuture<'_, Result<String>>;
+}
+
+struct McpTool {
+    name: String,
+    remote_name: String,
+    description: String,
+    parameters: Value,
+    peer: Peer<RoleClient>,
+}
+
+impl Tool for McpTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn parameters(&self) -> Value {
+        self.parameters.clone()
+    }
+    fn call(&self, arguments: Value) -> BoxFuture<'_, Result<String>> {
+        Box::pin(async move {
+            let arguments = arguments
+                .as_object()
+                .context("tool arguments must be a JSON object")?;
+            let result = timeout(
+                MCP_TIMEOUT,
+                self.peer.call_tool(
+                    CallToolRequestParams::new(self.remote_name.clone())
+                        .with_arguments(arguments.clone()),
+                ),
+            )
+            .await
+            .context("MCP tool call timed out")?
+            .context("MCP tool call failed")?;
+            Ok(render_result(result))
+        })
+    }
 }
 
 pub struct Tools {
     definitions: Vec<Value>,
-    routes: HashMap<String, Route>,
+    routes: HashMap<String, Box<dyn Tool>>,
     sessions: Vec<Session>,
 }
 
 impl Tools {
     pub fn new() -> Self {
-        Self {
-            definitions: vec![
-                definition(
-                    "echo",
-                    "Return the supplied text unchanged.",
-                    json!({
-                        "type": "object", "properties": {"text": {"type": "string"}},
-                        "required": ["text"], "additionalProperties": false
-                    }),
-                ),
-                read_file::definition(),
-            ],
-            routes: HashMap::from([
-                ("echo".into(), Route::Echo),
-                ("read_file".into(), Route::ReadFile),
-            ]),
+        let mut tools = Self {
+            definitions: Vec::new(),
+            routes: HashMap::new(),
             sessions: Vec::new(),
-        }
+        };
+        tools
+            .register(echo::Echo)
+            .expect("unique built-in tool name");
+        tools
+            .register(read_file::ReadFile)
+            .expect("unique built-in tool name");
+        tools
+            .register(text_editor::TextEditor)
+            .expect("unique built-in tool name");
+        tools
+    }
+
+    pub fn register(&mut self, tool: impl Tool + 'static) -> Result<()> {
+        let name = tool.name().to_owned();
+        ensure!(
+            !self.routes.contains_key(&name),
+            "tool name collision: {name}"
+        );
+        self.definitions
+            .push(definition(&name, tool.description(), tool.parameters()));
+        self.routes.insert(name, Box::new(tool));
+        Ok(())
     }
 
     pub fn definitions(&self) -> &[Value] {
@@ -88,6 +143,7 @@ impl Tools {
                     .client
                     .as_ref()
                     .context("missing MCP session")?;
+                let peer = client.peer().clone();
                 let available = client
                     .list_all_tools()
                     .await
@@ -98,18 +154,13 @@ impl Tools {
                         !self.routes.contains_key(&name),
                         "MCP tool name collision: {name}"
                     );
-                    self.definitions.push(definition(
-                        &name,
-                        tool.description.as_deref().unwrap_or(""),
-                        Value::Object((*tool.input_schema).clone()),
-                    ));
-                    self.routes.insert(
+                    self.register(McpTool {
                         name,
-                        Route::Mcp {
-                            session: index,
-                            name: tool.name.into_owned(),
-                        },
-                    );
+                        remote_name: tool.name.into_owned(),
+                        description: tool.description.as_deref().unwrap_or("").to_owned(),
+                        parameters: Value::Object((*tool.input_schema).clone()),
+                        peer: peer.clone(),
+                    })?;
                 }
                 Ok::<(), anyhow::Error>(())
             })
@@ -134,36 +185,10 @@ impl Tools {
         let arguments = arguments
             .as_object()
             .context("tool arguments must be a JSON object")?;
-        match self.routes.get(&call.function.name) {
-            Some(Route::ReadFile) => read_file::call(Value::Object(arguments.clone())).await,
-            Some(Route::Echo) => {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct Echo {
-                    text: String,
-                }
-                let args: Echo = serde_json::from_value(Value::Object(arguments.clone()))
-                    .context("echo expects a single string argument: text")?;
-                Ok(args.text)
-            }
-            Some(Route::Mcp { session, name }) => {
-                let client = self.sessions[*session]
-                    .client
-                    .as_ref()
-                    .context("MCP session unavailable")?;
-                let result = timeout(
-                    MCP_TIMEOUT,
-                    client.call_tool(
-                        CallToolRequestParams::new(name.clone()).with_arguments(arguments.clone()),
-                    ),
-                )
-                .await
-                .context("MCP tool call timed out")?
-                .context("MCP tool call failed")?;
-                Ok(render_result(result))
-            }
-            None => bail!("unknown tool: {}", call.function.name),
-        }
+        let Some(tool) = self.routes.get(&call.function.name) else {
+            bail!("unknown tool: {}", call.function.name);
+        };
+        tool.call(Value::Object(arguments.clone())).await
     }
 
     pub async fn shutdown(&mut self) -> Result<()> {
@@ -242,6 +267,43 @@ mod tests {
     use crate::model::FunctionCall;
 
     #[tokio::test]
+    async fn registers_custom_tools_and_rejects_duplicates_without_changes() {
+        struct Custom;
+        impl Tool for Custom {
+            fn name(&self) -> &str {
+                "custom"
+            }
+            fn description(&self) -> &str {
+                "A custom tool"
+            }
+            fn parameters(&self) -> Value {
+                json!({"type": "object"})
+            }
+            fn call(&self, arguments: Value) -> BoxFuture<'_, Result<String>> {
+                Box::pin(async move {
+                    tokio::task::yield_now().await;
+                    Ok(arguments.to_string())
+                })
+            }
+        }
+        let mut tools = Tools::new();
+        tools.register(Custom).unwrap();
+        let definitions = tools.definitions().to_vec();
+        assert_eq!(definitions.last().unwrap()["function"]["name"], "custom");
+        assert!(tools.register(Custom).is_err());
+        assert_eq!(tools.definitions(), definitions);
+        let call = ToolCall {
+            id: "custom-call".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "custom".into(),
+                arguments: r#"{"value":42}"#.into(),
+            },
+        };
+        assert_eq!(tools.call(&call).await, r#"{"value":42}"#);
+    }
+
+    #[tokio::test]
     async fn echo_and_invalid_calls() {
         let tools = Tools::new();
         for (name, arguments, expected) in [
@@ -285,4 +347,3 @@ mod tests {
         assert!(!output.contains("secret-binary-data"));
     }
 }
-mod read_file;
