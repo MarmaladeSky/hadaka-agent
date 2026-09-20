@@ -14,7 +14,9 @@ cargo run -- run "Use echo to repeat hello, then tell me the result."
 cargo run -- chat
 ```
 
-Both modes accept `--config PATH` before or after the subcommand. Chat retains history until exit; `/exit`, EOF, or Ctrl-C ends the session. Assistant text streams to stdout; prompts, tool names, and errors go to stderr. Exit codes are 0 for success, 1 for runtime errors, 2 for CLI usage errors, and 130 for Ctrl-C.
+Both modes accept `--config PATH` before or after the subcommand. In a terminal, `chat` opens an inline Ratatui console with a transcript, status line, and editable input. Enter submits a message; arrow keys, Home/End, and Backspace/Delete edit it. Pasted text is inserted without submitting. Page Up/Down scroll the transcript. `/exit` or Ctrl-D on empty input exits; Ctrl-C interrupts even while a response is streaming. Input is paused during model responses, while scrolling and exit keys remain available. The terminal is restored on exit or failure.
+
+Chat retains history until exit. When input or output is redirected, chat uses the plain line-based console and also exits on EOF. `run` always uses plain output. In plain mode assistant text streams to stdout; prompts, tool names, and errors go to stderr. In the Ratatui console, assistant text, tool activity, and MCP server stderr are displayed in the transcript. Exit codes are 0 for success, 1 for runtime errors, 2 for CLI usage errors, and 130 for Ctrl-C.
 
 ## Tools and configuration
 

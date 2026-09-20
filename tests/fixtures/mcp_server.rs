@@ -4,6 +4,9 @@ use std::io::{self, BufRead, Write};
 use serde_json::{Value, json};
 
 fn main() {
+    if let Ok(message) = std::env::var("FIXTURE_STDERR") {
+        eprintln!("{message}");
+    }
     if let Ok(path) = std::env::var("FIXTURE_PID_FILE") {
         std::fs::write(path, std::process::id().to_string()).unwrap();
     }

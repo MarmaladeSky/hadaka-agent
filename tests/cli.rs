@@ -105,6 +105,8 @@ fn unconfigured_chat_accepts_multiple_inputs_until_exit() {
 fn unconfigured_chat_can_be_interrupted_while_waiting_for_input() {
     let dir = tempfile::tempdir().unwrap();
     let mut child = command(&dir).arg("chat").spawn().unwrap();
+    // Keep stdin open through wait() so EOF cannot race the interrupt.
+    let _stdin = child.stdin.take().unwrap();
     let mut stderr = BufReader::new(child.stderr.take().unwrap());
     let mut line = String::new();
     while !line.contains("Chat ready.") {
@@ -359,6 +361,8 @@ fn ctrl_c_exits_while_waiting_for_terminal_input() {
         .arg("chat")
         .spawn()
         .unwrap();
+    // Keep stdin open through wait() so EOF cannot race the interrupt.
+    let _stdin = child.stdin.take().unwrap();
     let mut stderr = BufReader::new(child.stderr.take().unwrap());
     let mut line = String::new();
     while !line.contains("Chat ready.") {

@@ -23,6 +23,17 @@ impl Agent {
     }
 
     pub async fn run(&mut self, task: &str, tools: &Tools, output: &mut impl Write) -> Result<()> {
+        self.run_with_status(task, tools, output, |name| eprintln!("tool: {name}"))
+            .await
+    }
+
+    pub async fn run_with_status(
+        &mut self,
+        task: &str,
+        tools: &Tools,
+        output: &mut impl Write,
+        mut on_tool: impl FnMut(&str),
+    ) -> Result<()> {
         ensure!(!task.trim().is_empty(), "task must not be empty");
         self.messages.push(Message::text("user", task));
         for _ in 0..self.max_turns {
@@ -47,7 +58,7 @@ impl Agent {
                 .expect("assistant message was just appended")
                 .tool_calls
             {
-                eprintln!("tool: {}", call.function.name);
+                on_tool(&call.function.name);
                 let mut result = Message::text("tool", tools.call(call).await);
                 result.tool_call_id = Some(call.id.clone());
                 results.push(result);

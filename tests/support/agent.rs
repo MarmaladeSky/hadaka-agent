@@ -349,12 +349,19 @@ async fn mcp_discovers_pages_routes_calls_and_reaps_subprocess() {
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("pid");
     let config = config(&format!(
-        "[[mcp_servers]]\nname = 'fixture'\ncommand = {:?}\nargs = []\nenv = {{ FIXTURE_PID_FILE = {:?}, FIXTURE_HANG_ON_EOF = '1' }}",
+        "[[mcp_servers]]\nname = 'fixture'\ncommand = {:?}\nargs = []\nenv = {{ FIXTURE_PID_FILE = {:?}, FIXTURE_HANG_ON_EOF = '1', FIXTURE_STDERR = 'fixture diagnostic' }}",
         fixture.to_str().unwrap(),
         pid_file.to_str().unwrap(),
     ));
     let mut tools = Tools::new();
+    let (sender, mut diagnostics) = tokio::sync::mpsc::unbounded_channel();
+    tools.set_diagnostics(sender);
     tools.connect(&config.mcp_servers).await.unwrap();
+    let diagnostic = tokio::time::timeout(Duration::from_secs(5), diagnostics.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(diagnostic, "fixture: fixture diagnostic");
     let result = mock.agent("").run("use MCP", &tools, &mut Vec::new()).await;
     tools.shutdown().await.unwrap();
     result.unwrap();
