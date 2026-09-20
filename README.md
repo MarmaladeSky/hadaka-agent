@@ -13,7 +13,7 @@ cp agent.example.toml "${XDG_CONFIG_HOME:-$HOME/.config}/hadaka-agent/config.tom
 cargo run -- run "Use echo to repeat hello, then tell me the result."
 ```
 
-`run` executes one task non-interactively and exits. It accepts `--config PATH` before or after the subcommand. Assistant text streams to stdout while the task runs; tool names, MCP server diagnostics, and errors go to stderr. Exit codes are 0 for success, 1 for runtime errors, 2 for CLI usage errors, and 130 for Ctrl-C. Interrupting a task still shuts down MCP subprocesses.
+`run` executes one task non-interactively and exits. It accepts `--config PATH` before or after the subcommand. By default, stdout contains only the final assistant result. Add `-v` or `--verbose` for the full trace. Use `--format human` (the default) for readable output, or `--format json` for newline-delimited JSON. In verbose human mode, diagnostics include the input, system prompt, complete tool list and parameter schemas, model turns, tool calls, parameters, and results. In verbose JSON mode, events have `type` set to `input`, `system_prompt`, `tools`, `turn`, `output`, `tool_call`, or `tool_result`; the `tools` event contains the exact definitions sent to the model. Without `-v`, JSON mode emits only one `result` object. MCP server diagnostics and runtime errors remain on stderr. Exit codes are 0 for success, 1 for runtime errors, 2 for CLI usage errors, and 130 for Ctrl-C. Interrupting a task still shuts down MCP subprocesses.
 
 ## Tools and configuration
 

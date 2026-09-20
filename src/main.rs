@@ -60,8 +60,14 @@ async fn execute(cli: Cli, tools: &mut Tools) -> Result<()> {
     let model = DeepSeek::new(provider)?;
     tools.connect(&config.mcp_servers).await?;
     let mut agent = Agent::new(model, config.system_prompt, config.max_turns);
-    let cli::Mode::Run { task } = cli.command;
-    agent.run(&task, tools, &mut std::io::stdout()).await
+    let cli::Mode::Run {
+        task,
+        format,
+        verbose,
+    } = cli.command;
+    agent
+        .run_with_options(&task, tools, &mut std::io::stdout(), format, verbose)
+        .await
 }
 
 #[cfg(test)]

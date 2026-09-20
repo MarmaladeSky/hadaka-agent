@@ -167,7 +167,6 @@ impl Tools {
             .await
             .with_context(|| format!("MCP startup timed out: {}", server.name))?
             .with_context(|| format!("cannot connect MCP server {}", server.name))?;
-            eprintln!("connected MCP server: {}", server.name);
         }
         Ok(())
     }

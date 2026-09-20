@@ -1,6 +1,13 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum OutputFormat {
+    #[default]
+    Human,
+    Json,
+}
 
 #[derive(Parser)]
 #[command(
@@ -22,5 +29,11 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Mode {
     /// Run a single task and exit.
-    Run { task: String },
+    Run {
+        task: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+        #[arg(short = 'v', long)]
+        verbose: bool,
+    },
 }

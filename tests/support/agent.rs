@@ -10,7 +10,7 @@ use std::{
 
 use serde_json::{Value, json};
 
-use crate::{agent::Agent, config::Config, model::DeepSeek, tools::Tools};
+use crate::{agent::Agent, cli::OutputFormat, config::Config, model::DeepSeek, tools::Tools};
 
 struct Mock {
     endpoint: String,
@@ -243,6 +243,126 @@ async fn agent_reads_a_file_range() {
     assert_eq!(result["content"], "2: second\n");
     assert_eq!(result["next_offset"], 2);
     assert_eq!(output, b"Read second line\n");
+}
+
+#[tokio::test]
+async fn verbose_diagnostics_include_input_arguments_and_results() {
+    let mock = Mock::start(vec![
+        calls(vec![
+            ("ok", "echo", r#"{"text":"hello 世界"}"#),
+            ("bad", "echo", "{"),
+        ]),
+        answer("Finished"),
+    ]);
+    let mut output = Vec::new();
+    let mut diagnostics = Vec::new();
+    mock.agent("")
+        .run_with_diagnostics(
+            "Run both tools",
+            &Tools::new(),
+            &mut output,
+            &mut diagnostics,
+        )
+        .await
+        .unwrap();
+    let logs = String::from_utf8(diagnostics).unwrap();
+    let mut remaining = logs.as_str();
+    for expected in [
+        "input:\nRun both tools",
+        "system prompt:",
+        "output (turn 1/20):",
+        "tool call: echo (id: ok)",
+        "params:\n{\n  \"text\": \"hello 世界\"\n}",
+        "tool result: echo (id: ok)\nhello 世界",
+        "tool call: echo (id: bad)\nparams:\n{",
+        "tool result: echo (id: bad)\nError: tool arguments must be valid JSON",
+        "output (turn 2/20):",
+    ] {
+        let index = remaining
+            .find(expected)
+            .unwrap_or_else(|| panic!("missing {expected:?} in {remaining:?}"));
+        remaining = &remaining[index + expected.len()..];
+    }
+    assert_eq!(output, b"Finished\n");
+    mock.finish();
+}
+
+#[test]
+fn human_tool_result_formats_read_file_content_without_json() {
+    let result = super::agent::human_tool_result(
+        r#"{"content":"1: hello\n","total_lines":3,"has_more":true,"next_offset":1}"#,
+    );
+    assert_eq!(result, "1: hello\n(3 total lines, more available.)");
+    assert!(!result.contains("{\"content\""));
+}
+
+#[tokio::test]
+async fn json_format_emits_one_event_object_per_line() {
+    let mock = Mock::start(vec![answer("JSON done")]);
+    let mut output = Vec::new();
+    mock.agent("")
+        .run_with_options(
+            "JSON task",
+            &Tools::new(),
+            &mut output,
+            OutputFormat::Json,
+            true,
+        )
+        .await
+        .unwrap();
+    let events: Vec<Value> = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events[0]["type"], "input");
+    assert_eq!(events[0]["text"], "JSON task");
+    assert_eq!(events[1]["type"], "system_prompt");
+    assert_eq!(events[2]["type"], "tools");
+    assert_eq!(events[2]["tools"][0]["function"]["name"], "echo");
+    assert_eq!(events[3]["type"], "turn");
+    assert_eq!(events[4]["type"], "output");
+    assert_eq!(events[4]["text"], "JSON done");
+    mock.finish();
+}
+
+#[tokio::test]
+async fn quiet_mode_emits_only_the_final_result() {
+    let mock = Mock::start(vec![answer("Final answer")]);
+    let mut output = Vec::new();
+    mock.agent("")
+        .run_with_options(
+            "Quiet task",
+            &Tools::new(),
+            &mut output,
+            OutputFormat::Human,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(output, b"Final answer\n");
+    mock.finish();
+}
+
+#[tokio::test]
+async fn quiet_json_mode_emits_only_a_result_event() {
+    let mock = Mock::start(vec![answer("Final JSON answer")]);
+    let mut output = Vec::new();
+    mock.agent("")
+        .run_with_options(
+            "Quiet JSON task",
+            &Tools::new(),
+            &mut output,
+            OutputFormat::Json,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).unwrap(),
+        json!({"type":"result", "text":"Final JSON answer"})
+    );
+    mock.finish();
 }
 
 #[tokio::test]
