@@ -72,7 +72,7 @@ pub(super) fn render(state: &State, frame: &mut Frame) {
     frame.render_widget(transcript.scroll((offset, 0)), areas[0]);
     frame.render_widget(&state.input, areas[2]);
     frame.render_widget(
-        Paragraph::new("Enter: send | Scroll: terminal | /exit, Ctrl-D: exit | Ctrl-C: interrupt")
+        Paragraph::new("Enter: send | /exit, Ctrl-D: exit | Ctrl-C: interrupt")
             .style(Style::default().fg(Color::DarkGray)),
         areas[3],
     );
