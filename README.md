@@ -33,6 +33,8 @@ Replace the placeholder key and set `enabled = true` to run workflows. DeepSeek 
 
 Workflow settings remain at the root: `system_prompt`, `max_turns`, and `mcp_servers`. When omitted, these use the example's system prompt, 20 turns, and no MCP servers. An omitted `providers` array defaults to empty. Unknown fields are rejected.
 
+The built-in `read_file` tool takes `{"path":"src/main.rs","offset":0,"limit":100}`. Both `offset` and `limit` are required and currently count lines: offset is zero-based and limit is 1–1000. Relative paths resolve from the launch directory; absolute paths are supported. Results contain numbered `content` (one-based line numbers), `total_lines`, `has_more`, and `next_offset` (null at EOF). Reading beyond EOF returns empty content. Files must be regular UTF-8 text files, without NUL bytes, of at most 1 MiB. Output is capped at 64 KiB of numbered text on whole-line boundaries; use `next_offset` to continue. A single line exceeding that cap returns an error.
+
 The built-in `echo` tool takes `{"text":"..."}` and returns that text unchanged. To connect local tools over stdio, replace `mcp_servers = []` with `[[mcp_servers]]` entries. Every entry requires `name`, `command`, `args`, and `env`; use `args = []` and `env = {}` when empty. Server names must be unique. Commands run directly, inherit the launch directory and environment, and apply the configured environment overrides. Configured tools execute automatically.
 
 MCP tools appear as `mcp_SERVER__TOOL`. Characters outside ASCII letters, digits, `_`, and `-` become `_`, and names are limited to 64 characters. Any resulting collision fails startup. The original server tool name is used when invoking it. All discovery pages are loaded once at startup.
@@ -43,7 +45,7 @@ Provider credentials are stored directly in config; `DEEPSEEK_API_KEY` and `HADA
 
 Model responses time out after 120 seconds; MCP startup and tool calls after 60 seconds. HTTP errors, malformed or incomplete streams, and exhausted turn limits end the invocation. Requests are not retried automatically. On exit, connections close and subprocesses get three seconds to finish before being terminated.
 
-Task context is text-only and in memory. There is no persistence, context compaction, remote MCP transport, or built-in shell/file access. Requests explicitly disable DeepSeek thinking mode; this harness streams answer text and tool calls without retaining reasoning history. See [DeepSeek's thinking-mode documentation](https://api-docs.deepseek.com/guides/thinking_mode/) for the API behavior.
+Task context is text-only and in memory. There is no persistence, context compaction, remote MCP transport, or built-in shell/file-writing access. Requests explicitly disable DeepSeek thinking mode; this harness streams answer text and tool calls without retaining reasoning history. See [DeepSeek's thinking-mode documentation](https://api-docs.deepseek.com/guides/thinking_mode/) for the API behavior.
 
 ## Development
 

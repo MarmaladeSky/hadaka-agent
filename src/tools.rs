@@ -25,6 +25,7 @@ struct Session {
 
 enum Route {
     Echo,
+    ReadFile,
     Mcp { session: usize, name: String },
 }
 
@@ -37,15 +38,21 @@ pub struct Tools {
 impl Tools {
     pub fn new() -> Self {
         Self {
-            definitions: vec![definition(
-                "echo",
-                "Return the supplied text unchanged.",
-                json!({
-                    "type": "object", "properties": {"text": {"type": "string"}},
-                    "required": ["text"], "additionalProperties": false
-                }),
-            )],
-            routes: HashMap::from([("echo".into(), Route::Echo)]),
+            definitions: vec![
+                definition(
+                    "echo",
+                    "Return the supplied text unchanged.",
+                    json!({
+                        "type": "object", "properties": {"text": {"type": "string"}},
+                        "required": ["text"], "additionalProperties": false
+                    }),
+                ),
+                read_file::definition(),
+            ],
+            routes: HashMap::from([
+                ("echo".into(), Route::Echo),
+                ("read_file".into(), Route::ReadFile),
+            ]),
             sessions: Vec::new(),
         }
     }
@@ -128,6 +135,7 @@ impl Tools {
             .as_object()
             .context("tool arguments must be a JSON object")?;
         match self.routes.get(&call.function.name) {
+            Some(Route::ReadFile) => read_file::call(Value::Object(arguments.clone())).await,
             Some(Route::Echo) => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -277,3 +285,4 @@ mod tests {
         assert!(!output.contains("secret-binary-data"));
     }
 }
+mod read_file;

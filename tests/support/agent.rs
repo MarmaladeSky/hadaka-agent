@@ -223,6 +223,29 @@ async fn text_is_flushed_before_the_response_finishes() {
 }
 
 #[tokio::test]
+async fn agent_reads_a_file_range() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("input.txt");
+    std::fs::write(&path, "first\nsecond\nthird\n").unwrap();
+    let arguments = json!({"path": path, "offset": 1, "limit": 1}).to_string();
+    let mock = Mock::start(vec![
+        calls(vec![("read", "read_file", &arguments)]),
+        answer("Read second line"),
+    ]);
+    let mut output = Vec::new();
+    mock.agent("")
+        .run("Read the second line", &Tools::new(), &mut output)
+        .await
+        .unwrap();
+    let requests = mock.finish();
+    let result: Value =
+        serde_json::from_str(requests[1]["messages"][3]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(result["content"], "2: second\n");
+    assert_eq!(result["next_offset"], 2);
+    assert_eq!(output, b"Read second line\n");
+}
+
+#[tokio::test]
 async fn tool_results_preserve_call_ids_and_errors() {
     let mock = Mock::start(vec![
         calls(vec![
@@ -365,7 +388,15 @@ async fn mcp_discovers_pages_routes_calls_and_reaps_subprocess() {
         .iter()
         .map(|tool| tool["function"]["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["echo", "mcp_fixture__echo", "mcp_fixture__second"]);
+    assert_eq!(
+        names,
+        [
+            "echo",
+            "read_file",
+            "mcp_fixture__echo",
+            "mcp_fixture__second"
+        ]
+    );
     let result = requests[1]["messages"][3]["content"].as_str().unwrap();
     assert!(result.contains("second: hi\nsecond content block"));
     assert!(result.contains(r#""tool":"second""#));
