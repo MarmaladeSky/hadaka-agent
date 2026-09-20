@@ -9,10 +9,7 @@ use rmcp::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
     process::{Child, Command},
-    sync::mpsc::UnboundedSender,
-    task::JoinHandle,
     time::timeout,
 };
 
@@ -24,7 +21,6 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 struct Session {
     child: Child,
     client: Option<RunningService<RoleClient, ()>>,
-    stderr_task: Option<JoinHandle<()>>,
 }
 
 enum Route {
@@ -36,7 +32,6 @@ pub struct Tools {
     definitions: Vec<Value>,
     routes: HashMap<String, Route>,
     sessions: Vec<Session>,
-    diagnostics: Option<UnboundedSender<String>>,
 }
 
 impl Tools {
@@ -52,16 +47,11 @@ impl Tools {
             )],
             routes: HashMap::from([("echo".into(), Route::Echo)]),
             sessions: Vec::new(),
-            diagnostics: None,
         }
     }
 
     pub fn definitions(&self) -> &[Value] {
         &self.definitions
-    }
-
-    pub fn set_diagnostics(&mut self, sender: UnboundedSender<String>) {
-        self.diagnostics = Some(sender);
     }
 
     pub async fn connect(&mut self, servers: &[McpServer]) -> Result<()> {
@@ -73,41 +63,16 @@ impl Tools {
                 .envs(&server.env)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(if self.diagnostics.is_some() {
-                    Stdio::piped()
-                } else {
-                    Stdio::inherit()
-                })
+                .stderr(Stdio::inherit())
                 .kill_on_drop(true)
                 .spawn()
                 .with_context(|| format!("cannot start MCP server {}", server.name))?;
             let stdout = child.stdout.take().context("MCP stdout unavailable")?;
             let stdin = child.stdin.take().context("MCP stdin unavailable")?;
-            let stderr_task = self.diagnostics.as_ref().map(|sender| {
-                let sender = sender.clone();
-                let name = server.name.clone();
-                let stderr = child.stderr.take().expect("MCP stderr was piped");
-                tokio::spawn(async move {
-                    let mut lines = BufReader::new(stderr).lines();
-                    loop {
-                        match lines.next_line().await {
-                            Ok(Some(line)) => {
-                                let _ = sender.send(format!("{name}: {line}"));
-                            }
-                            Ok(None) => break,
-                            Err(error) => {
-                                let _ = sender.send(format!("{name}: cannot read stderr: {error}"));
-                                break;
-                            }
-                        }
-                    }
-                })
-            });
             let index = self.sessions.len();
             self.sessions.push(Session {
                 child,
                 client: None,
-                stderr_task,
             });
             timeout(MCP_TIMEOUT, async {
                 let client = ().serve((stdout, stdin)).await.context("MCP initialization failed")?;
@@ -211,9 +176,6 @@ impl Tools {
                         errors.push(format!("cannot terminate MCP process: {error}"));
                     }
                 }
-            }
-            if let Some(task) = session.stderr_task.take() {
-                task.abort();
             }
         }
         self.sessions.clear();

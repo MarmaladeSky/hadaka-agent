@@ -1,5 +1,4 @@
 use std::{
-    io::{BufRead, BufReader, Write},
     path::PathBuf,
     process::{Child, Command, Output, Stdio},
     thread,
@@ -32,6 +31,7 @@ fn command(dir: &TempDir) -> Command {
         .env_remove("HADAKA_API_KEY")
         .env_remove("FIXTURE_COLLISION")
         .env_remove("FIXTURE_HANG_ON_EOF")
+        .env_remove("FIXTURE_HANG_ON_START")
         .env_remove("FIXTURE_PID_FILE")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -57,96 +57,34 @@ fn wait(mut child: Child) -> Output {
 }
 
 #[test]
-fn chat_exits_on_eof_without_a_model_request() {
-    let dir = config("");
-    let mut child = command(&dir)
-        .args(["chat", "--config", "agent.toml"])
-        .spawn()
-        .unwrap();
-    drop(child.stdin.take());
-    let output = wait(child);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
-fn unconfigured_chat_accepts_multiple_inputs_until_exit() {
+fn only_task_execution_is_available() {
     let dir = tempfile::tempdir().unwrap();
-    let mut child = command(&dir).arg("chat").spawn().unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(b"hello\n\ntry again\n/exit\n")
-        .unwrap();
-    let output = wait(child);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let messages = String::from_utf8_lossy(&output.stderr);
-    assert!(messages.contains("Chat ready"));
-    assert_eq!(
-        messages
-            .matches("A provider needs to be configured first")
-            .count(),
-        3
-    );
-    assert_eq!(messages.matches("you> ").count(), 4);
-    assert!(output.stdout.is_empty());
-}
-
-#[test]
-fn plain_chat_runs_exact_commands_and_rejects_unknown_ones() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut child = command(&dir).arg("chat").spawn().unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(b"/settings\n/SETTINGS\n/set\n/nope\n/exit\n")
-        .unwrap();
-    let output = wait(child);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let messages = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout)
-            .matches("Not yet implemented")
-            .count(),
-        2,
-        "/settings runs without a provider, whatever its case"
-    );
-    assert!(messages.contains("Unknown command: /set"));
-    assert!(messages.contains("Unknown command: /nope"));
-    assert_eq!(
-        messages
-            .matches("A provider needs to be configured first")
-            .count(),
-        1,
-        "only the startup banner: no slash command reaches the model: {messages}"
-    );
+    for args in [vec![], vec!["chat"], vec!["run"]] {
+        let output = wait(command(&dir).args(args).spawn().unwrap());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!dir.path().join(".config").exists());
+    }
 }
 
 #[cfg(unix)]
 #[test]
-fn unconfigured_chat_can_be_interrupted_while_waiting_for_input() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut child = command(&dir).arg("chat").spawn().unwrap();
-    // Keep stdin open through wait() so EOF cannot race the interrupt.
-    let _stdin = child.stdin.take().unwrap();
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut line = String::new();
-    while !line.contains("Chat ready.") {
-        line.clear();
-        assert!(stderr.read_line(&mut line).unwrap() > 0);
+fn ctrl_c_during_task_startup_reaps_mcp_process() {
+    let dir = config(&mcp_config());
+    let pid_file = dir.path().join("pid");
+    let mut child = command(&dir)
+        .env("FIXTURE_PID_FILE", &pid_file)
+        .env("FIXTURE_HANG_ON_START", "1")
+        .args(["run", "hello"])
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !pid_file.exists() {
+        if Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("MCP fixture did not start");
+        }
+        thread::sleep(Duration::from_millis(10));
     }
     assert!(
         Command::new("kill")
@@ -156,41 +94,44 @@ fn unconfigured_chat_can_be_interrupted_while_waiting_for_input() {
             .success()
     );
     assert_eq!(wait(child).status.code(), Some(130));
+    #[cfg(target_os = "linux")]
+    assert!(
+        !PathBuf::from(format!(
+            "/proc/{}",
+            std::fs::read_to_string(pid_file).unwrap()
+        ))
+        .exists()
+    );
 }
 
 #[test]
-fn missing_default_config_is_created_in_both_modes() {
-    for mode in [vec!["chat"], vec!["run", "hello"]] {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".config/hadaka-agent/config.toml");
-        let output = wait(
-            command(&dir)
-                .args(&mode)
-                .env_remove("DEEPSEEK_API_KEY")
-                .spawn()
-                .unwrap(),
-        );
-        assert_eq!(
-            output.status.code(),
-            Some(if mode[0] == "chat" { 0 } else { 1 })
-        );
-        let error = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            error.contains("A provider needs to be configured first"),
-            "{error}"
-        );
-        let created = std::fs::read_to_string(path).unwrap();
-        let config: toml::Table = toml::from_str(&created).unwrap();
-        let providers = config["providers"].as_array().unwrap();
-        assert_eq!(providers.len(), 1);
-        assert_eq!(providers[0]["provider_name"].as_str(), Some("deepseek"));
-        assert_eq!(providers[0]["enabled"].as_bool(), Some(false));
-        assert_eq!(
-            providers[0]["api_key"].as_str(),
-            Some("invalid-placeholder-key")
-        );
-        assert!(output.stdout.is_empty());
-    }
+fn missing_default_config_is_created() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".config/hadaka-agent/config.toml");
+    let output = wait(
+        command(&dir)
+            .args(["run", "hello"])
+            .env_remove("DEEPSEEK_API_KEY")
+            .spawn()
+            .unwrap(),
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("A provider needs to be configured first"),
+        "{error}"
+    );
+    let created = std::fs::read_to_string(path).unwrap();
+    let config: toml::Table = toml::from_str(&created).unwrap();
+    let providers = config["providers"].as_array().unwrap();
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0]["provider_name"].as_str(), Some("deepseek"));
+    assert_eq!(providers[0]["enabled"].as_bool(), Some(false));
+    assert_eq!(
+        providers[0]["api_key"].as_str(),
+        Some("invalid-placeholder-key")
+    );
+    assert!(output.stdout.is_empty());
 }
 
 #[test]
@@ -198,7 +139,7 @@ fn missing_explicit_config_is_not_created() {
     let dir = tempfile::tempdir().unwrap();
     let output = wait(
         command(&dir)
-            .args(["chat", "--config", "missing.toml"])
+            .args(["run", "hello", "--config", "missing.toml"])
             .spawn()
             .unwrap(),
     );
@@ -209,7 +150,7 @@ fn missing_explicit_config_is_not_created() {
 }
 
 #[test]
-fn empty_config_requires_provider_setup_in_both_modes() {
+fn empty_config_requires_provider_setup() {
     let dir = config("");
     let default_path = dir.path().join(".config/hadaka-agent/config.toml");
     let explicit_path = dir.path().join("agent.toml");
@@ -222,30 +163,24 @@ fn empty_config_requires_provider_setup_in_both_modes() {
     ] {
         std::fs::write(&default_path, source).unwrap();
         std::fs::write(&explicit_path, source).unwrap();
-        for mode in [vec!["chat"], vec!["run", "hello"]] {
-            for explicit in [false, true] {
-                for key in [None, Some("test-key")] {
-                    let mut cmd = command(&dir);
-                    cmd.args(&mode).env_remove("DEEPSEEK_API_KEY");
-                    if explicit {
-                        cmd.arg("--config").arg(&explicit_path);
-                    }
-                    if let Some(key) = key {
-                        cmd.env("DEEPSEEK_API_KEY", key);
-                    }
-                    let output = wait(cmd.spawn().unwrap());
-                    assert_eq!(
-                        output.status.code(),
-                        Some(if mode[0] == "chat" { 0 } else { 1 })
-                    );
-                    let error = String::from_utf8_lossy(&output.stderr);
-                    assert!(
-                        error.contains("A provider needs to be configured first"),
-                        "{error}"
-                    );
-                    assert_eq!(error.contains("Chat ready"), mode[0] == "chat", "{error}");
-                    assert!(output.stdout.is_empty());
+        for explicit in [false, true] {
+            for key in [None, Some("test-key")] {
+                let mut cmd = command(&dir);
+                cmd.args(["run", "hello"]).env_remove("DEEPSEEK_API_KEY");
+                if explicit {
+                    cmd.arg("--config").arg(&explicit_path);
                 }
+                if let Some(key) = key {
+                    cmd.env("DEEPSEEK_API_KEY", key);
+                }
+                let output = wait(cmd.spawn().unwrap());
+                assert_eq!(output.status.code(), Some(1));
+                let error = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    error.contains("A provider needs to be configured first"),
+                    "{error}"
+                );
+                assert!(output.stdout.is_empty());
             }
         }
     }
@@ -258,24 +193,18 @@ fn disabled_provider_does_not_start_mcp_servers() {
         mcp_config()
     ));
     let pid_file = dir.path().join("pid");
-    for mode in [vec!["chat"], vec!["run", "hello"]] {
-        let output = wait(
-            command(&dir)
-                .args(&mode)
-                .env("FIXTURE_PID_FILE", &pid_file)
-                .spawn()
-                .unwrap(),
-        );
-        assert_eq!(
-            output.status.code(),
-            Some(if mode[0] == "chat" { 0 } else { 1 })
-        );
-        assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("A provider needs to be configured first")
-        );
-        assert!(!pid_file.exists());
-    }
+    let output = wait(
+        command(&dir)
+            .args(["run", "hello"])
+            .env("FIXTURE_PID_FILE", &pid_file)
+            .spawn()
+            .unwrap(),
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("A provider needs to be configured first")
+    );
+    assert!(!pid_file.exists());
 }
 
 #[test]
@@ -301,35 +230,33 @@ fn invalid_config_is_not_treated_as_empty() {
 #[test]
 fn requires_a_nonblank_config_key_even_when_environment_keys_are_set() {
     let dir = config("");
-    for mode in [vec!["chat"], vec!["run", "hello"]] {
-        for key in [None, Some(""), Some(" \t ")] {
-            let mut source: toml::Table =
-                toml::from_str(include_str!("../agent.example.toml")).unwrap();
-            let provider = source.get_mut("providers").unwrap().as_array_mut().unwrap()[0]
-                .as_table_mut()
-                .unwrap();
-            provider.insert("enabled".into(), toml::Value::Boolean(true));
-            provider.remove("api_key");
-            if let Some(key) = key {
-                provider.insert("api_key".into(), toml::Value::String(key.into()));
-            }
-            std::fs::write(
-                dir.path().join(".config/hadaka-agent/config.toml"),
-                source.to_string(),
-            )
+    for key in [None, Some(""), Some(" \t ")] {
+        let mut source: toml::Table =
+            toml::from_str(include_str!("../agent.example.toml")).unwrap();
+        let provider = source.get_mut("providers").unwrap().as_array_mut().unwrap()[0]
+            .as_table_mut()
             .unwrap();
-            let mut cmd = command(&dir);
-            cmd.args(&mode)
-                .env("DEEPSEEK_API_KEY", "environment-key")
-                .env("HADAKA_API_KEY", "legacy-key");
-            let output = wait(cmd.spawn().unwrap());
-            assert_eq!(output.status.code(), Some(1));
-            let error = String::from_utf8_lossy(&output.stderr);
-            assert!(error.contains("api_key"), "{error}");
-            assert!(!error.contains("environment-key"));
-            assert!(!error.contains("legacy-key"));
-            assert!(output.stdout.is_empty());
+        provider.insert("enabled".into(), toml::Value::Boolean(true));
+        provider.remove("api_key");
+        if let Some(key) = key {
+            provider.insert("api_key".into(), toml::Value::String(key.into()));
         }
+        std::fs::write(
+            dir.path().join(".config/hadaka-agent/config.toml"),
+            source.to_string(),
+        )
+        .unwrap();
+        let mut cmd = command(&dir);
+        cmd.args(["run", "hello"])
+            .env("DEEPSEEK_API_KEY", "environment-key")
+            .env("HADAKA_API_KEY", "legacy-key");
+        let output = wait(cmd.spawn().unwrap());
+        assert_eq!(output.status.code(), Some(1));
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("api_key"), "{error}");
+        assert!(!error.contains("environment-key"));
+        assert!(!error.contains("legacy-key"));
+        assert!(output.stdout.is_empty());
     }
 }
 
@@ -376,42 +303,6 @@ fn mcp_naming_collisions_fail_startup_and_clean_up() {
     );
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("name collision"));
-    #[cfg(target_os = "linux")]
-    assert!(
-        !PathBuf::from(format!(
-            "/proc/{}",
-            std::fs::read_to_string(pid_file).unwrap()
-        ))
-        .exists()
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn ctrl_c_exits_while_waiting_for_terminal_input() {
-    let dir = config(&mcp_config());
-    let pid_file = dir.path().join("pid");
-    let mut child = command(&dir)
-        .env("FIXTURE_PID_FILE", &pid_file)
-        .arg("chat")
-        .spawn()
-        .unwrap();
-    // Keep stdin open through wait() so EOF cannot race the interrupt.
-    let _stdin = child.stdin.take().unwrap();
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut line = String::new();
-    while !line.contains("Chat ready.") {
-        line.clear();
-        assert!(stderr.read_line(&mut line).unwrap() > 0);
-    }
-    assert!(
-        Command::new("kill")
-            .args(["-INT", &child.id().to_string()])
-            .status()
-            .unwrap()
-            .success()
-    );
-    assert_eq!(wait(child).status.code(), Some(130));
     #[cfg(target_os = "linux")]
     assert!(
         !PathBuf::from(format!(

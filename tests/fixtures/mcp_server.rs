@@ -10,6 +10,9 @@ fn main() {
     if let Ok(path) = std::env::var("FIXTURE_PID_FILE") {
         std::fs::write(path, std::process::id().to_string()).unwrap();
     }
+    if std::env::var_os("FIXTURE_HANG_ON_START").is_some() {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
     let mut output = io::stdout().lock();
     for line in io::stdin().lock().lines() {
         let request: Value = serde_json::from_str(&line.unwrap()).unwrap();

@@ -262,7 +262,7 @@ async fn tool_results_preserve_call_ids_and_errors() {
 }
 
 #[tokio::test]
-async fn conversation_retains_history_and_resets_turn_budget() {
+async fn tasks_have_independent_context_and_turn_budgets() {
     let mock = Mock::start(vec![answer("first reply"), answer("second reply")]);
     let mut agent = mock.agent("max_turns = 1");
     let tools = Tools::new();
@@ -271,8 +271,8 @@ async fn conversation_retains_history_and_resets_turn_budget() {
     agent.run("second task", &tools, &mut output).await.unwrap();
     assert_eq!(output, b"first reply\nsecond reply\n");
     let requests = mock.finish();
-    assert_eq!(requests[1]["messages"][2]["content"], "first reply");
-    assert_eq!(requests[1]["messages"][3]["content"], "second task");
+    assert_eq!(requests[1]["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(requests[1]["messages"][1]["content"], "second task");
 }
 
 #[tokio::test]
@@ -354,14 +354,7 @@ async fn mcp_discovers_pages_routes_calls_and_reaps_subprocess() {
         pid_file.to_str().unwrap(),
     ));
     let mut tools = Tools::new();
-    let (sender, mut diagnostics) = tokio::sync::mpsc::unbounded_channel();
-    tools.set_diagnostics(sender);
     tools.connect(&config.mcp_servers).await.unwrap();
-    let diagnostic = tokio::time::timeout(Duration::from_secs(5), diagnostics.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(diagnostic, "fixture: fixture diagnostic");
     let result = mock.agent("").run("use MCP", &tools, &mut Vec::new()).await;
     tools.shutdown().await.unwrap();
     result.unwrap();

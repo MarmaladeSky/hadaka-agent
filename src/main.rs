@@ -23,9 +23,6 @@ async fn main() -> ExitCode {
             signal.context("cannot listen for Ctrl-C")
         }
     };
-    interrupted |= result
-        .as_ref()
-        .is_err_and(|error| error.is::<cli::Interrupted>());
     let cleanup = tools.shutdown().await;
     if let Err(error) = &result
         && !interrupted
@@ -55,22 +52,16 @@ async fn execute(cli: Cli, tools: &mut Tools) -> Result<()> {
         }
     };
     let config = Config::load(&config_path)?;
-    let (diagnostics_tx, diagnostics_rx) = tokio::sync::mpsc::unbounded_channel();
-    if cli::is_interactive(&cli.command) {
-        tools.set_diagnostics(diagnostics_tx);
-    }
     let setup_message = format!(
         "A provider needs to be configured first. Set the DeepSeek provider's api_key and enabled = true in {}.",
         config_path.display()
     );
-    let agent = if let Some(provider) = config.enabled_provider() {
-        let model = DeepSeek::new(provider)?;
-        tools.connect(&config.mcp_servers).await?;
-        Some(Agent::new(model, config.system_prompt, config.max_turns))
-    } else {
-        None
-    };
-    cli::run(cli.command, agent, tools, &setup_message, diagnostics_rx).await
+    let provider = config.enabled_provider().context(setup_message)?;
+    let model = DeepSeek::new(provider)?;
+    tools.connect(&config.mcp_servers).await?;
+    let mut agent = Agent::new(model, config.system_prompt, config.max_turns);
+    let cli::Mode::Run { task } = cli.command;
+    agent.run(&task, tools, &mut std::io::stdout()).await
 }
 
 #[cfg(test)]
