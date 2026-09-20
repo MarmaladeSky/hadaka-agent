@@ -6,23 +6,20 @@ use std::{
 use anyhow::Result;
 use crossterm::{
     cursor::{MoveTo, Show},
-    event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
-        KeyModifiers,
-    },
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event},
     execute,
-    terminal::disable_raw_mode,
+    terminal::{Clear, ClearType, disable_raw_mode},
 };
 use ratatui::{
-    DefaultTerminal, Frame, TerminalOptions, Viewport,
-    layout::{Constraint, Layout},
-    style::{Color, Style},
-    widgets::{Block, Paragraph, Wrap},
+    DefaultTerminal, Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, layout::Rect,
 };
-use ratatui_textarea::TextArea;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, UnboundedReceiver};
 
-use super::Interrupted;
+use super::{
+    state::{Action, State},
+    stream::{Output, StreamWriter, apply_output},
+    view::{self, render},
+};
 use crate::{agent::Agent, tools::Tools};
 
 // Keep polling and inline cursor-position queries on the same thread. An
@@ -47,29 +44,61 @@ impl TerminalEvents {
 // This guard also runs when main's Ctrl-C select cancels the UI future.
 struct TerminalSession {
     terminal: Option<DefaultTerminal>,
-    bottom: u16,
+    area: Rect,
 }
 
 impl TerminalSession {
     fn new() -> Result<Self> {
         let mut session = Self {
             terminal: None,
-            bottom: 0,
+            area: Rect::ZERO,
         };
-        session.terminal = Some(ratatui::try_init_with_options(TerminalOptions {
-            viewport: Viewport::Inline(16),
-        })?);
+        let mut terminal = ratatui::try_init_with_options(TerminalOptions {
+            viewport: Viewport::Inline(view::MIN_HEIGHT),
+        })?;
+        session.area = terminal.get_frame().area();
+        session.terminal = Some(terminal);
         execute!(io::stdout(), EnableBracketedPaste)?;
         Ok(session)
     }
 
-    fn draw(&mut self, state: &State) -> Result<()> {
-        let frame = self
+    fn draw(&mut self, state: &mut State) -> Result<()> {
+        let terminal = self.terminal.as_mut().expect("terminal initialized");
+        terminal.autoresize()?;
+        view::flush_completed(terminal, &mut state.pending_output)?;
+        self.area = terminal.get_frame().area();
+        let size = self
             .terminal
-            .as_mut()
+            .as_ref()
             .expect("terminal initialized")
-            .draw(|frame| state.render(frame))?;
-        self.bottom = frame.area.bottom().saturating_sub(1);
+            .size()?;
+        let height = view::height(state, size);
+        if height != self.area.height {
+            self.grow(height)?;
+        }
+        let terminal = self.terminal.as_mut().expect("terminal initialized");
+        terminal.draw(|frame| render(state, frame))?;
+        // A completed frame reports the whole terminal; only a Frame knows the viewport.
+        self.area = terminal.get_frame().area();
+        Ok(())
+    }
+
+    // Ratatui fixes the inline height at construction, so following the content
+    // means clearing the old viewport and anchoring a new one at its origin.
+    fn grow(&mut self, height: u16) -> Result<()> {
+        execute!(
+            io::stdout(),
+            MoveTo(0, self.area.top()),
+            Clear(ClearType::FromCursorDown)
+        )?;
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(io::stdout()),
+            TerminalOptions {
+                viewport: Viewport::Inline(height),
+            },
+        )?;
+        self.area = terminal.get_frame().area();
+        self.terminal = Some(terminal);
         Ok(())
     }
 }
@@ -81,163 +110,9 @@ impl Drop for TerminalSession {
             io::stdout(),
             DisableBracketedPaste,
             Show,
-            MoveTo(0, self.bottom)
+            MoveTo(0, self.area.bottom().saturating_sub(1))
         );
         let _ = writeln!(io::stdout());
-    }
-}
-
-struct State {
-    input: TextArea<'static>,
-    transcript: String,
-    status: String,
-    scroll_back: usize,
-}
-
-enum Action {
-    Continue,
-    Submit(String),
-    Exit,
-}
-
-impl State {
-    fn new(configured: bool, setup_message: &str) -> Self {
-        let mut state = Self {
-            input: Self::input(),
-            transcript: String::new(),
-            status: if configured {
-                "Ready"
-            } else {
-                "Provider setup required"
-            }
-            .into(),
-            scroll_back: 0,
-        };
-        if !configured {
-            state.note(setup_message);
-        }
-        state
-    }
-
-    fn input() -> TextArea<'static> {
-        let mut input = TextArea::default();
-        input.set_block(Block::bordered().title(" you> "));
-        input.set_cursor_line_style(Style::default());
-        input.set_placeholder_text("Type a message or /exit");
-        input
-    }
-
-    fn note(&mut self, text: &str) {
-        if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
-            self.transcript.push('\n');
-        }
-        self.transcript.push_str(text);
-        self.transcript.push('\n');
-    }
-
-    fn handle(&mut self, event: Event, busy: bool) -> Result<Action> {
-        match event {
-            Event::Key(key) if key.kind != KeyEventKind::Release => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                    match key.code {
-                        KeyCode::Char('c') => return Err(Interrupted.into()),
-                        KeyCode::Char('d') if self.input.lines().iter().all(String::is_empty) => {
-                            return Ok(Action::Exit);
-                        }
-                        _ => {}
-                    }
-                }
-                match key.code {
-                    KeyCode::PageUp => self.scroll_back = self.scroll_back.saturating_add(5),
-                    KeyCode::PageDown => self.scroll_back = self.scroll_back.saturating_sub(5),
-                    KeyCode::Enter if !busy => {
-                        let text = self.input.lines().join("\n");
-                        self.input = Self::input();
-                        if text.trim() == "/exit" {
-                            return Ok(Action::Exit);
-                        }
-                        if !text.trim().is_empty() {
-                            self.scroll_back = 0;
-                            self.note(&format!("you> {text}"));
-                            return Ok(Action::Submit(text));
-                        }
-                    }
-                    _ if !busy => {
-                        self.input.input(key);
-                    }
-                    _ => {}
-                }
-            }
-            Event::Paste(text) if !busy => {
-                // A paste inserts text; only an explicit Enter submits it.
-                self.input.insert_str(text.replace(['\r', '\n'], " "));
-            }
-            _ => {}
-        }
-        Ok(Action::Continue)
-    }
-
-    fn render(&self, frame: &mut Frame) {
-        let areas = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ])
-        .split(frame.area());
-        frame.render_widget(
-            Paragraph::new(format!("hadaka-agent  |  {}", self.status))
-                .style(Style::default().fg(Color::Cyan)),
-            areas[0],
-        );
-        let transcript = Paragraph::new(self.transcript.as_str()).wrap(Wrap { trim: false });
-        let bottom = transcript
-            .line_count(areas[1].width)
-            .saturating_sub(usize::from(areas[1].height));
-        let offset = bottom
-            .saturating_sub(self.scroll_back)
-            .min(u16::MAX as usize) as u16;
-        frame.render_widget(transcript.scroll((offset, 0)), areas[1]);
-        frame.render_widget(&self.input, areas[2]);
-        frame.render_widget(
-            Paragraph::new(
-                "Enter: send | PgUp/PgDn: scroll | /exit, Ctrl-D: exit | Ctrl-C: interrupt",
-            )
-            .style(Style::default().fg(Color::DarkGray)),
-            areas[3],
-        );
-    }
-}
-
-enum Output {
-    Text(String),
-    Tool(String),
-}
-
-struct StreamWriter(UnboundedSender<Output>);
-
-impl Write for StreamWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        self.0
-            .send(Output::Text(text.into()))
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "console closed"))?;
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-fn apply_output(state: &mut State, output: Output) {
-    match output {
-        Output::Text(text) => state.transcript.push_str(&text),
-        Output::Tool(name) => {
-            state.status = format!("Running tool: {name}");
-            state.note(&format!("tool: {name}"));
-        }
     }
 }
 
@@ -251,7 +126,7 @@ pub async fn run(
     let mut state = State::new(agent.is_some(), setup_message);
     let mut events = TerminalEvents::new();
     loop {
-        terminal.draw(&state)?;
+        terminal.draw(&mut state)?;
         let event = tokio::select! {
             Some(message) = diagnostics.recv() => { state.note(&message); continue; }
             event = events.next() => event?,
@@ -266,7 +141,7 @@ pub async fn run(
                 };
                 state.status = "Responding…".into();
                 state.note("assistant>");
-                terminal.draw(&state)?;
+                terminal.draw(&mut state)?;
                 let (sender, mut output) = mpsc::unbounded_channel();
                 let mut writer = StreamWriter(sender.clone());
                 let response = agent.run_with_status(&task, tools, &mut writer, |name| {
@@ -279,7 +154,7 @@ pub async fn run(
                         result = &mut response => break result,
                         Some(chunk) = output.recv() => apply_output(&mut state, chunk),
                         Some(message) = diagnostics.recv() => state.note(&message),
-                        _ = redraw.tick() => terminal.draw(&state)?,
+                        _ = redraw.tick() => terminal.draw(&mut state)?,
                         event = events.next() => {
                             if matches!(state.handle(event?, true)?, Action::Exit) {
                                 return Ok(());
@@ -297,102 +172,11 @@ pub async fn run(
                     "Response failed"
                 }
                 .into();
-                terminal.draw(&state)?;
+                if !state.pending_output.is_empty() && !state.pending_output.ends_with('\n') {
+                    state.pending_output.push('\n');
+                }
+                terminal.draw(&mut state)?;
                 result?;
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crossterm::event::KeyEvent;
-
-    #[test]
-    fn streamed_text_and_tool_status_reach_the_transcript_in_order() {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-        let mut writer = StreamWriter(sender.clone());
-        writer.write_all("Hello, 世界!".as_bytes()).unwrap();
-        writer.flush().unwrap();
-        sender.send(Output::Tool("echo".into())).unwrap();
-        writer.write_all(b"Done.\n").unwrap();
-        let mut state = State::new(true, "");
-        while let Ok(chunk) = receiver.try_recv() {
-            apply_output(&mut state, chunk);
-        }
-        assert_eq!(state.transcript, "Hello, 世界!\ntool: echo\nDone.\n");
-        assert_eq!(state.status, "Running tool: echo");
-    }
-
-    #[test]
-    fn busy_console_rejects_edits_but_accepts_interrupts() {
-        let mut state = State::new(true, "");
-        state.handle(Event::Paste("ignored".into()), true).unwrap();
-        let action = state
-            .handle(
-                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-                true,
-            )
-            .unwrap();
-        assert!(matches!(action, Action::Continue));
-        assert_eq!(state.input.lines(), &[""]);
-        let error = state
-            .handle(
-                Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-                true,
-            )
-            .err()
-            .unwrap();
-        assert!(error.is::<Interrupted>());
-    }
-
-    #[test]
-    fn editing_paste_and_submission_preserve_unicode() {
-        let mut state = State::new(false, "Configure a provider first");
-        state
-            .handle(Event::Paste("héllo\nworld".into()), false)
-            .unwrap();
-        state
-            .handle(
-                Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
-                false,
-            )
-            .unwrap();
-        state
-            .handle(
-                Event::Key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE)),
-                false,
-            )
-            .unwrap();
-        let action = state
-            .handle(
-                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-                false,
-            )
-            .unwrap();
-        assert!(matches!(action, Action::Submit(text) if text == "héllo worl!d"));
-        assert_eq!(state.input.lines(), &[""]);
-    }
-
-    #[test]
-    fn renders_setup_guidance_and_input_at_small_sizes() {
-        for (width, height) in [(80, 16), (20, 8), (1, 1)] {
-            let mut terminal =
-                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
-            terminal
-                .draw(|frame| State::new(false, "Configure a provider first").render(frame))
-                .unwrap();
-            if width == 80 {
-                let screen: String = terminal
-                    .backend()
-                    .buffer()
-                    .content
-                    .iter()
-                    .map(|cell| cell.symbol())
-                    .collect();
-                assert!(screen.contains("Configure a provider first"));
-                assert!(screen.contains("you>"));
             }
         }
     }

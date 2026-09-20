@@ -1,4 +1,7 @@
+mod state;
+mod stream;
 mod tui;
+mod view;
 
 use std::{
     io::{self, BufRead, IsTerminal, Write},
@@ -84,6 +87,10 @@ pub async fn run(
                 let line = line.context("cannot read terminal input")?;
                 if line.trim() == "/exit" {
                     return Ok(());
+                }
+                if line.trim() == "/settings" {
+                    writeln!(output, "Not yet implemented")?;
+                    continue;
                 }
                 if line.trim().is_empty() {
                     continue;
