@@ -1,0 +1,20 @@
+# DeepSeek is the only supported provider. Set a real api_key and enabled = true.
+# The endpoint is fixed to https://api.deepseek.com/chat/completions.
+system_prompt = "You are a helpful assistant. Use the available tools when needed. Answer the user when the task is complete or you need clarification."
+max_turns = 20
+mcp_servers = []
+
+[[providers]]
+provider_name = "deepseek"
+enabled = false
+model = "deepseek-flash"
+api_key = "invalid-placeholder-key"
+
+# To connect local MCP servers, remove mcp_servers = [] and add entries below.
+# Every field is required; use args = [] and env = {} when empty.
+# Commands run directly in the launch directory.
+# [[mcp_servers]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/absolute/path/to/workspace"]
+# env = {}
