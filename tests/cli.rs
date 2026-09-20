@@ -100,6 +100,41 @@ fn unconfigured_chat_accepts_multiple_inputs_until_exit() {
     assert!(output.stdout.is_empty());
 }
 
+#[test]
+fn plain_chat_runs_exact_commands_and_rejects_unknown_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = command(&dir).arg("chat").spawn().unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/settings\n/SETTINGS\n/set\n/nope\n/exit\n")
+        .unwrap();
+    let output = wait(child);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let messages = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout)
+            .matches("Not yet implemented")
+            .count(),
+        2,
+        "/settings runs without a provider, whatever its case"
+    );
+    assert!(messages.contains("Unknown command: /set"));
+    assert!(messages.contains("Unknown command: /nope"));
+    assert_eq!(
+        messages
+            .matches("A provider needs to be configured first")
+            .count(),
+        1,
+        "only the startup banner: no slash command reaches the model: {messages}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn unconfigured_chat_can_be_interrupted_while_waiting_for_input() {

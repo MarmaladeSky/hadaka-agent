@@ -16,6 +16,7 @@ use ratatui::{
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use super::{
+    commands::CommandId,
     state::{Action, State},
     stream::{Output, StreamWriter, apply_output},
     view::{self, render},
@@ -134,6 +135,8 @@ pub async fn run(
         match state.handle(event, false)? {
             Action::Continue => {}
             Action::Exit => return Ok(()),
+            Action::Command(CommandId::Exit) => return Ok(()),
+            Action::Command(CommandId::Settings) => state.note("Not yet implemented"),
             Action::Submit(task) => {
                 let Some(agent) = &mut agent else {
                     state.note(setup_message);

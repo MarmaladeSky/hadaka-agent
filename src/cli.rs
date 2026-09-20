@@ -1,3 +1,4 @@
+mod commands;
 mod state;
 mod stream;
 mod tui;
@@ -85,11 +86,15 @@ pub async fn run(
                     return Ok(());
                 };
                 let line = line.context("cannot read terminal input")?;
-                if line.trim() == "/exit" {
-                    return Ok(());
+                if let Some(command) = commands::find(&line) {
+                    match command.id {
+                        commands::CommandId::Exit => return Ok(()),
+                        commands::CommandId::Settings => writeln!(output, "Not yet implemented")?,
+                    }
+                    continue;
                 }
-                if line.trim() == "/settings" {
-                    writeln!(output, "Not yet implemented")?;
+                if line.trim().starts_with('/') {
+                    eprintln!("Unknown command: {}", line.trim());
                     continue;
                 }
                 if line.trim().is_empty() {
