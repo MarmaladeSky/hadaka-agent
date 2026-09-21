@@ -2,6 +2,10 @@
 name = "hadaka-agent"
 version = "0.1.0"
 edition = "2024"
+description = "A task-focused, security-first agent runtime designed to remain simple and reviewable."
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/MarmaladeSky/hadaka-agent"
 
 [dependencies]
 anyhow = "1"
