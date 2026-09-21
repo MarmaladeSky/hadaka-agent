@@ -24,7 +24,8 @@ async fn main() -> ExitCode {
         cli.allow_read.clone(),
         cli.allow_write.clone(),
         cli.allow_exec.clone(),
-    );
+    )
+    .with_network_hosts(cli.allow_net.clone());
     let mut tools = Tools::with_policy(policy);
     let mut interrupted = false;
     let result = tokio::select! {

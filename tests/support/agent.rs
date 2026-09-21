@@ -307,6 +307,18 @@ fn human_tool_result_formats_read_file_content_without_json() {
     assert!(!result.contains("{\"content\""));
 }
 
+#[test]
+fn human_web_result_shows_source_content_and_truncation() {
+    let result = super::agent::human_tool_result(
+        r#"{"final_url":"https://example.com/releases","status":200,"content_type":"application/json","title":null,"content":{"version":"2.0"},"links":[],"truncated":true,"untrusted":true}"#,
+    );
+    assert!(result.contains("Source: https://example.com/releases"));
+    assert!(result.contains("HTTP 200"));
+    assert!(result.contains("version:\n  2.0"));
+    assert!(result.contains("Content truncated"));
+    assert!(!result.contains("{\""));
+}
+
 #[tokio::test]
 async fn json_format_emits_one_event_object_per_line() {
     let mock = Mock::start(vec![answer("JSON done")]);
@@ -528,6 +540,7 @@ async fn mcp_discovers_pages_routes_calls_and_reaps_subprocess() {
             "run_command",
             "read_file",
             "text_editor",
+            "fetch_url",
             "mcp_fixture__echo",
             "mcp_fixture__second"
         ]

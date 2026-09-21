@@ -25,6 +25,16 @@ File and executable permissions are task-scoped and deny-by-default. Use repeata
 
 ## Tools and configuration
 
+The built-in `fetch_url` tool reads public HTTPS URLs using GET. Grant each exact hostname with repeatable `--allow-net HOST`; subdomains and redirect destinations require their own grants. The tool remains visible without permission and returns an error if called. Only port 443 is supported, URL credentials are rejected, and every resolved address and redirect destination must be public. DNS addresses are pinned for the connection and environment proxies are disabled. These network restrictions apply to `fetch_url`, not subprocesses, MCP servers, or the model connection.
+
+```sh
+cargo run -- --allow-net github.com "Check the latest release at https://github.com/rust-lang/rust/releases"
+```
+
+Arguments are `url`, optional `representation` (`auto`, `text`, `json`, or `raw`), and optional `max_chars` (default 30000, range 1–100000). `auto` converts HTML into Markdown-like text, parses JSON, and preserves XML/plain text. `text` converts HTML and otherwise returns textual bodies; `json` requires valid JSON; `raw` returns the UTF-8 body unchanged apart from the character limit. HTML conversion removes scripts, styles, and comments, preserves headings, lists, tables, code, and links, and resolves links against the final URL. It does not run JavaScript or fetch linked resources. Responses must be UTF-8, without NUL bytes; other encodings and binary downloads are unsupported.
+
+Results include `url`, `final_url`, `status`, `content_type`, `representation`, `title`, `content`, up to 100 distinct `links`, `truncated`, and `untrusted`. HTTP error bodies are returned with their status. Text is truncated at Unicode character boundaries; oversized JSON returns an error instead of broken JSON. Downloads are limited to 2 MiB, five redirects, and a 30-second operation timeout. Verbose human output shows readable content and source metadata; JSON output preserves structured results. Web content is treated as untrusted evidence in the system instructions.
+
 The root `providers` array holds provider configurations. `providers = []`, or an array containing only disabled providers, represents an unconfigured application. In this state, the program reports that a provider needs to be configured first and exits with code 1. No MCP servers start and no model requests are made without an enabled provider. Edit configuration in the file before running a task. Legacy blank files are also accepted as unconfigured. If the default config file is missing, startup creates its parent directories and writes the example configuration with a disabled DeepSeek placeholder and an invalid API key. Existing files are preserved. A missing file explicitly selected with `--config PATH` still produces a file-read error.
 
 Each provider requires a unique `provider_name`, an `enabled` boolean, `model`, and `api_key`:

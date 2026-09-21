@@ -28,6 +28,7 @@ struct Session {
 }
 
 mod echo;
+mod fetch_url;
 mod list_directory;
 mod read_file;
 mod run_command;
@@ -50,6 +51,7 @@ pub struct PermissionPolicy {
     read_roots: Vec<PathBuf>,
     write_roots: Vec<PathBuf>,
     exec_programs: Vec<String>,
+    net_hosts: Vec<String>,
 }
 
 impl PermissionPolicy {
@@ -62,6 +64,7 @@ impl PermissionPolicy {
             read_roots: normalize_roots(read_roots),
             write_roots: normalize_roots(write_roots),
             exec_programs,
+            net_hosts: Vec::new(),
         }
     }
 
@@ -72,6 +75,24 @@ impl PermissionPolicy {
             vec![PathBuf::from(".")],
             vec!["cargo".into(), "rustfmt".into(), "git".into()],
         )
+    }
+
+    pub fn with_network_hosts(mut self, hosts: Vec<String>) -> Self {
+        self.net_hosts = hosts
+            .into_iter()
+            .map(|host| host.to_ascii_lowercase())
+            .collect();
+        self
+    }
+
+    fn check_host(&self, host: &str) -> Result<()> {
+        ensure!(
+            self.net_hosts
+                .iter()
+                .any(|allowed| allowed == &host.to_ascii_lowercase()),
+            "permission denied: network access to `{host}` is not allowed (requires --allow-net {host})"
+        );
+        Ok(())
     }
 
     fn check(&self, path: &str, roots: &[PathBuf], operation: &str) -> Result<()> {
@@ -205,6 +226,9 @@ impl Tools {
             .expect("unique built-in tool name");
         tools
             .register(text_editor::TextEditor)
+            .expect("unique built-in tool name");
+        tools
+            .register(fetch_url::FetchUrl::new(policy))
             .expect("unique built-in tool name");
         tools
     }
@@ -457,7 +481,8 @@ mod tests {
                 "search_files",
                 "run_command",
                 "read_file",
-                "text_editor"
+                "text_editor",
+                "fetch_url"
             ]
         );
 
@@ -479,7 +504,8 @@ mod tests {
                 "search_files",
                 "run_command",
                 "read_file",
-                "text_editor"
+                "text_editor",
+                "fetch_url"
             ]
         );
         let call = ToolCall {
