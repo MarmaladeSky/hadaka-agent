@@ -10,6 +10,12 @@ use serde_json::{Value, json};
 use super::{BoxFuture, PermissionPolicy, Tool};
 
 const MAX_BYTES: usize = 2 * 1024 * 1024;
+const DEFAULT_CONTENT_CHARS: usize = 30_000;
+const MAX_CONTENT_CHARS: usize = 100_000;
+const MAX_TITLE_CHARS: usize = 512;
+const MAX_LINK_CHARS: usize = 2_048;
+const MAX_LINKS: usize = 100;
+const MAX_RESULT_BYTES: usize = 512 * 1024;
 
 pub(super) struct FetchUrl {
     policy: PermissionPolicy,
@@ -36,7 +42,7 @@ struct Arguments {
 }
 
 fn default_max_chars() -> usize {
-    30_000
+    DEFAULT_CONTENT_CHARS
 }
 
 impl FetchUrl {
@@ -146,7 +152,7 @@ impl Tool for FetchUrl {
         json!({"type":"object", "properties":{
             "url":{"type":"string","description":"Public HTTPS URL (port 443)."},
             "representation":{"type":"string","enum":["auto","text","json","raw"],"default":"auto"},
-            "max_chars":{"type":"integer","minimum":1,"maximum":100000,"default":30000}
+            "max_chars":{"type":"integer","minimum":1,"maximum":MAX_CONTENT_CHARS,"default":DEFAULT_CONTENT_CHARS}
         },"required":["url"],"additionalProperties":false})
     }
     fn call(&self, arguments: Value) -> BoxFuture<'_, Result<String>> {
@@ -154,8 +160,8 @@ impl Tool for FetchUrl {
             let args: Arguments =
                 serde_json::from_value(arguments).context("invalid fetch_url arguments")?;
             ensure!(
-                (1..=100_000).contains(&args.max_chars),
-                "max_chars must be between 1 and 100000"
+                (1..=MAX_CONTENT_CHARS).contains(&args.max_chars),
+                "max_chars must be between 1 and {MAX_CONTENT_CHARS}"
             );
             tokio::time::timeout(Duration::from_secs(30), self.fetch(args))
                 .await
@@ -190,9 +196,10 @@ fn public_ip(ip: IpAddr) -> bool {
     }
 }
 
-fn clean_dom(root: &Handle, base: &Url) -> (Option<String>, Vec<String>) {
+fn clean_dom(root: &Handle, base: &Url) -> (Option<String>, Vec<String>, bool) {
     let mut title = None;
     let mut links = Vec::new();
+    let mut truncated = false;
     let mut stack = vec![root.clone()];
     while let Some(node) = stack.pop() {
         if let Element { name, attrs, .. } = &node.data {
@@ -211,8 +218,14 @@ fn clean_dom(root: &Handle, base: &Url) -> (Option<String>, Vec<String>) {
                     if let Ok(link) = base.join(&attr.value) {
                         if matches!(link.scheme(), "https" | "http") {
                             attr.value = link.as_str().into();
-                            if links.len() < 100 && !links.contains(&link.to_string()) {
-                                links.push(link.to_string());
+                            let link = link.to_string();
+                            if !links.contains(&link) {
+                                if links.len() < MAX_LINKS && link.chars().count() <= MAX_LINK_CHARS
+                                {
+                                    links.push(link);
+                                } else {
+                                    truncated = true;
+                                }
                             }
                         } else {
                             attr.value = "".into();
@@ -234,7 +247,13 @@ fn clean_dom(root: &Handle, base: &Url) -> (Option<String>, Vec<String>) {
             });
         stack.extend(node.children.borrow().iter().rev().cloned());
     }
-    (title, links)
+    if let Some(text) = &mut title
+        && text.chars().count() > MAX_TITLE_CHARS
+    {
+        *text = text.chars().take(MAX_TITLE_CHARS).collect();
+        truncated = true;
+    }
+    (title, links, truncated)
 }
 
 fn convert(
@@ -256,6 +275,7 @@ fn convert(
     let json_body = mime == "application/json" || mime.ends_with("+json");
     let mut title = None;
     let mut links = Vec::new();
+    let mut truncated = false;
     let (representation, mut content) = match args.representation {
         Representation::Json => (
             "json",
@@ -268,7 +288,7 @@ fn convert(
         Representation::Auto | Representation::Text if html => {
             let config = html2text::config::plain();
             let dom = config.parse_html(body.as_bytes())?;
-            (title, links) = clean_dom(&dom.document, url);
+            (title, links, truncated) = clean_dom(&dom.document, url);
             (
                 "text",
                 Value::String(config.render_to_string(config.dom_to_render_tree(&dom)?, 100)?),
@@ -284,26 +304,193 @@ fn convert(
         }
         _ => bail!("unsupported content type: {content_type}"),
     };
-    let mut truncated = false;
     if representation == "json" {
         ensure!(
             serde_json::to_string(&content)?.chars().count() <= args.max_chars,
             "JSON exceeds max_chars; increase the limit or request raw representation"
         );
     } else if let Some(text) = content.as_str() {
-        truncated = text.chars().count() > args.max_chars;
+        truncated |= text.chars().count() > args.max_chars;
         content = Value::String(text.chars().take(args.max_chars).collect());
     }
-    Ok(serde_json::to_string(
-        &json!({"url":args.url,"final_url":url.as_str(),"status":status,
+    bounded_result(
+        json!({"url":args.url,"final_url":url.as_str(),"status":status,
         "content_type":content_type,"representation":representation,"title":title,
         "content":content,"links":links,"truncated":truncated,"untrusted":true}),
-    )?)
+    )
+}
+
+fn bounded_result(mut result: Value) -> Result<String> {
+    loop {
+        let serialized = serde_json::to_string(&result)?;
+        if serialized.len() <= MAX_RESULT_BYTES {
+            return Ok(serialized);
+        }
+        result["truncated"] = json!(true);
+        // Preserve content first, dropping whole links rather than corrupting URLs.
+        if result["links"].as_array_mut().unwrap().pop().is_some() {
+            continue;
+        }
+        ensure!(
+            result["representation"] != "json",
+            "JSON result exceeds the {MAX_RESULT_BYTES}-byte output limit"
+        );
+        let text = result["content"]
+            .as_str()
+            .context("expected text content")?;
+        ensure!(
+            !text.is_empty(),
+            "response metadata exceeds the {MAX_RESULT_BYTES}-byte output limit"
+        );
+        // JSON escaping can expand text. Removing at least the excess raw bytes
+        // also removes at least that many serialized bytes, without splitting UTF-8.
+        let mut end = text
+            .len()
+            .saturating_sub(serialized.len() - MAX_RESULT_BYTES);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        result["content"] = Value::String(text[..end].to_owned());
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn convert_html(html: &str, max_chars: usize) -> String {
+        let url = Url::parse("https://example.com/releases/").unwrap();
+        let args: Arguments = serde_json::from_value(json!({
+            "url": url.as_str(), "max_chars": max_chars
+        }))
+        .unwrap();
+        convert(&args, &url, 200, "text/html", html.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn web_metadata_limits_preserve_normal_content() {
+        let result: Value = serde_json::from_str(&convert_html(
+            "<title>Release notes</title><h1>Version 2</h1><a href='../v2'>Details</a>",
+            30_000,
+        ))
+        .unwrap();
+        assert_eq!(result["title"], "Release notes");
+        assert_eq!(result["links"], json!(["https://example.com/v2"]));
+        assert!(result["content"].as_str().unwrap().contains("Version 2"));
+        assert_eq!(result["truncated"], false);
+    }
+
+    #[test]
+    fn web_metadata_limits_bound_unicode_titles() {
+        let title = "界".repeat(MAX_TITLE_CHARS * 4);
+        let result: Value = serde_json::from_str(&convert_html(
+            &format!("<title>{title}</title><p>Release notes</p>"),
+            30_000,
+        ))
+        .unwrap();
+        let returned = result["title"].as_str().expect("retain a readable title");
+        assert!(!returned.is_empty());
+        assert!(
+            returned.chars().count() <= MAX_TITLE_CHARS,
+            "title contains {} characters",
+            returned.chars().count()
+        );
+        assert_eq!(
+            result["truncated"], true,
+            "metadata truncation must be visible"
+        );
+    }
+
+    #[test]
+    fn web_metadata_limits_omit_oversized_links_without_shortening_urls() {
+        let long_url = format!("https://example.com/{}", "a".repeat(MAX_LINK_CHARS));
+        let result: Value = serde_json::from_str(&convert_html(
+            &format!("<a href='{long_url}'>Long link</a><a href='/v2'>Release</a>"),
+            30_000,
+        ))
+        .unwrap();
+        assert_eq!(
+            result["links"],
+            json!(["https://example.com/v2"]),
+            "omit oversized URLs while preserving valid links unchanged"
+        );
+        assert_eq!(
+            result["truncated"], true,
+            "omitted metadata must be visible"
+        );
+    }
+
+    #[test]
+    fn web_metadata_limits_bound_complete_serialized_result() {
+        // Each URL is individually within its limit; their combined size plus
+        // multibyte content must still fit the complete result's byte budget.
+        let mut html = format!("<p>{}</p>", "🦀".repeat(MAX_CONTENT_CHARS));
+        for index in 0..MAX_LINKS {
+            let prefix = format!("https://example.com/{index}/");
+            let url = format!("{prefix}{}", "a".repeat(MAX_LINK_CHARS - prefix.len()));
+            html.push_str(&format!("<a href='{url}'>Release {index}</a>"));
+        }
+        assert!(html.len() < MAX_BYTES);
+        let serialized = convert_html(&html, MAX_CONTENT_CHARS);
+        assert!(
+            serialized.len() <= MAX_RESULT_BYTES,
+            "serialized result is {} bytes, maximum is {MAX_RESULT_BYTES}",
+            serialized.len()
+        );
+        let result: Value = serde_json::from_str(&serialized).unwrap();
+        assert!(!result["content"].as_str().unwrap().is_empty());
+        assert_eq!(result["truncated"], true);
+    }
+
+    #[test]
+    fn result_byte_limit_accounts_for_json_escaping() {
+        let url = Url::parse("https://example.com/").unwrap();
+        let args = Arguments {
+            url: url.to_string(),
+            representation: Representation::Raw,
+            max_chars: MAX_CONTENT_CHARS,
+        };
+        let body = "\u{0001}".repeat(MAX_CONTENT_CHARS);
+        let serialized = convert(&args, &url, 200, "text/plain", body.as_bytes()).unwrap();
+        assert!(serialized.len() <= MAX_RESULT_BYTES);
+        let result: Value = serde_json::from_str(&serialized).unwrap();
+        let content = result["content"].as_str().unwrap();
+        assert!(!content.is_empty());
+        assert!(body.starts_with(content));
+        assert_eq!(result["truncated"], true);
+    }
+
+    #[test]
+    fn result_byte_limit_rejects_oversized_fixed_metadata() {
+        let url = Url::parse(&format!(
+            "https://example.com/{}",
+            "a".repeat(MAX_RESULT_BYTES)
+        ))
+        .unwrap();
+        for representation in [Representation::Raw, Representation::Json] {
+            let args = Arguments {
+                url: url.to_string(),
+                representation,
+                max_chars: MAX_CONTENT_CHARS,
+            };
+            assert!(convert(&args, &url, 200, "application/json", b"{}").is_err());
+        }
+    }
+
+    #[test]
+    fn web_metadata_limits_preserve_boundary_link_and_report_count_limit() {
+        let prefix = "https://example.com/";
+        let boundary_url = format!("{prefix}{}", "a".repeat(MAX_LINK_CHARS - prefix.len()));
+        let mut html = format!("<a href='{boundary_url}'>First</a>");
+        for index in 0..MAX_LINKS {
+            html.push_str(&format!("<a href='/release/{index}'>Release</a>"));
+        }
+        let result: Value =
+            serde_json::from_str(&convert_html(&html, DEFAULT_CONTENT_CHARS)).unwrap();
+        assert_eq!(result["links"][0], boundary_url);
+        assert_eq!(result["links"].as_array().unwrap().len(), MAX_LINKS);
+        assert_eq!(result["truncated"], true);
+    }
 
     #[test]
     fn rejects_nonpublic_addresses() {

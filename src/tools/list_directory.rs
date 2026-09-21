@@ -116,7 +116,7 @@ fn collect(root: &Path, current: &Path, depth: usize, entries: &mut Vec<Value>) 
             item["size"] = json!(metadata.len());
         }
         entries.push(item);
-        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        if depth > 1 && metadata.is_dir() && !metadata.file_type().is_symlink() {
             collect(root, &path, depth - 1, entries)?;
         }
     }
@@ -126,6 +126,50 @@ fn collect(root: &Path, current: &Path, depth: usize, entries: &mut Vec<Value>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn depth_limits_return_only_requested_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+        fs::create_dir(dir.path().join("tests")).unwrap();
+        fs::write(dir.path().join("main.rs"), "x").unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "xx").unwrap();
+        fs::write(dir.path().join("src/nested/deep.rs"), "xxx").unwrap();
+        fs::write(dir.path().join("tests/test.rs"), "xxxx").unwrap();
+
+        for (depth, expected) in [
+            (0, json!([{"path": ".", "type": "directory"}])),
+            (
+                1,
+                json!([
+                    {"path": "main.rs", "type": "file", "size": 1},
+                    {"path": "src", "type": "directory"},
+                    {"path": "tests", "type": "directory"}
+                ]),
+            ),
+            (
+                2,
+                json!([
+                    {"path": "main.rs", "type": "file", "size": 1},
+                    {"path": "src", "type": "directory"},
+                    {"path": "src/lib.rs", "type": "file", "size": 2},
+                    {"path": "src/nested", "type": "directory"},
+                    {"path": "tests", "type": "directory"},
+                    {"path": "tests/test.rs", "type": "file", "size": 4}
+                ]),
+            ),
+        ] {
+            let result: Value = serde_json::from_str(
+                &ListDirectory
+                    .call(json!({"path": dir.path(), "depth": depth}))
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(result["entries"], expected, "depth {depth}");
+            assert_eq!(result["truncated"], false);
+        }
+    }
 
     #[tokio::test]
     async fn lists_sorted_entries_and_does_not_follow_symlinks() {
