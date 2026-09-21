@@ -523,6 +523,7 @@ async fn mcp_discovers_pages_routes_calls_and_reaps_subprocess() {
         [
             "echo",
             "list_directory",
+            "search_files",
             "read_file",
             "text_editor",
             "mcp_fixture__echo",

@@ -17,6 +17,8 @@ Running the program executes one task non-interactively and exits. It accepts `-
 
 The built-in `list_directory` tool lists entries below a path with an optional `depth` (default 1, maximum 8). It reports files, directories, symlinks, and file sizes; symlinks are never followed. It uses the same read permission as `read_file`.
 
+The built-in `search_files` tool recursively searches UTF-8 files for a literal, case-sensitive query. It accepts an optional path, simple filename glob, result limit, and surrounding context-line count. It uses the same read permission and does not follow symlinked directories.
+
 File permissions are task-scoped and deny-by-default. Use repeatable `--allow-read PATH` and `--allow-write PATH` flags; omitted flags grant no file access. The model always receives the built-in file tools, but each operation is checked at execution time and returns a permission error when access was not granted. Read and write permissions are independent. Paths are resolved relative to the launch directory, canonicalized, and checked before each operation. Path traversal and symlink escapes are denied. MCP permissions are not yet restricted by these flags.
 
 ## Tools and configuration

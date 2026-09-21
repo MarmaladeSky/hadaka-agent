@@ -30,6 +30,7 @@ struct Session {
 mod echo;
 mod list_directory;
 mod read_file;
+mod search_files;
 mod text_editor;
 
 use futures_util::future::BoxFuture;
@@ -175,6 +176,9 @@ impl Tools {
             .register(list_directory::ListDirectory)
             .expect("unique built-in tool name");
         tools
+            .register(search_files::SearchFiles)
+            .expect("unique built-in tool name");
+        tools
             .register(read_file::ReadFile)
             .expect("unique built-in tool name");
         tools
@@ -270,7 +274,10 @@ impl Tools {
         let Some(tool) = self.routes.get(&call.function.name) else {
             bail!("unknown tool: {}", call.function.name);
         };
-        if call.function.name == "read_file" || call.function.name == "list_directory" {
+        if call.function.name == "read_file"
+            || call.function.name == "list_directory"
+            || call.function.name == "search_files"
+        {
             let arguments: Value = serde_json::from_str(&call.function.arguments)
                 .context("tool arguments must be valid JSON")?;
             let path = arguments
@@ -412,7 +419,13 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["echo", "list_directory", "read_file", "text_editor"]
+            [
+                "echo",
+                "list_directory",
+                "search_files",
+                "read_file",
+                "text_editor"
+            ]
         );
 
         let read_only =
@@ -424,7 +437,13 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["echo", "list_directory", "read_file", "text_editor"]
+            [
+                "echo",
+                "list_directory",
+                "search_files",
+                "read_file",
+                "text_editor"
+            ]
         );
         let call = ToolCall {
             id: "denied".into(),

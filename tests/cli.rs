@@ -76,6 +76,7 @@ fn help_lists_tools_and_permissions() {
         "echo",
         "list_directory",
         "read_file",
+        "search_files",
         "text_editor",
         "--allow-read",
         "--allow-write",
