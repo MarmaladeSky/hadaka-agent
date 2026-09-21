@@ -1,4 +1,9 @@
-use std::{collections::HashMap, process::Stdio, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use rmcp::{
@@ -35,6 +40,73 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
     fn parameters(&self) -> Value;
     fn call(&self, arguments: Value) -> BoxFuture<'_, Result<String>>;
+}
+
+#[derive(Clone, Debug)]
+pub struct PermissionPolicy {
+    read_roots: Vec<PathBuf>,
+    write_roots: Vec<PathBuf>,
+}
+
+impl PermissionPolicy {
+    pub fn new(read_roots: Vec<PathBuf>, write_roots: Vec<PathBuf>) -> Self {
+        Self {
+            read_roots: normalize_roots(read_roots),
+            write_roots: normalize_roots(write_roots),
+        }
+    }
+
+    #[cfg(test)]
+    fn allow_all() -> Self {
+        Self::new(vec![PathBuf::from(".")], vec![PathBuf::from(".")])
+    }
+
+    fn check(&self, path: &str, roots: &[PathBuf], operation: &str) -> Result<()> {
+        let path = resolve_path(path)?;
+        ensure!(
+            roots.iter().any(|root| path.starts_with(root)),
+            "permission denied: {operation} `{}` is not allowed",
+            path.display()
+        );
+        Ok(())
+    }
+
+    fn check_read(&self, path: &str) -> Result<()> {
+        self.check(path, &self.read_roots, "read")
+    }
+
+    fn check_write(&self, path: &str) -> Result<()> {
+        self.check(path, &self.write_roots, "write")
+    }
+}
+
+fn normalize_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    roots
+        .into_iter()
+        .filter_map(|root| {
+            let root = if root.is_absolute() {
+                root
+            } else {
+                std::env::current_dir().ok()?.join(root)
+            };
+            std::fs::canonicalize(root).ok()
+        })
+        .collect()
+}
+
+fn resolve_path(path: &str) -> Result<PathBuf> {
+    let path = Path::new(path);
+    let path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    if path.exists() {
+        return Ok(std::fs::canonicalize(path)?);
+    }
+    let parent = path.parent().context("path has no parent")?;
+    let parent = std::fs::canonicalize(parent)?;
+    Ok(parent.join(path.file_name().context("path has no filename")?))
 }
 
 struct McpTool {
@@ -79,14 +151,21 @@ pub struct Tools {
     definitions: Vec<Value>,
     routes: HashMap<String, Box<dyn Tool>>,
     sessions: Vec<Session>,
+    policy: PermissionPolicy,
 }
 
 impl Tools {
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_policy(PermissionPolicy::allow_all())
+    }
+
+    pub fn with_policy(policy: PermissionPolicy) -> Self {
         let mut tools = Self {
             definitions: Vec::new(),
             routes: HashMap::new(),
             sessions: Vec::new(),
+            policy: policy.clone(),
         };
         tools
             .register(echo::Echo)
@@ -187,6 +266,23 @@ impl Tools {
         let Some(tool) = self.routes.get(&call.function.name) else {
             bail!("unknown tool: {}", call.function.name);
         };
+        if call.function.name == "read_file" {
+            let arguments: Value = serde_json::from_str(&call.function.arguments)
+                .context("tool arguments must be valid JSON")?;
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .context("read_file path must be a string")?;
+            self.policy.check_read(path)?;
+        } else if call.function.name == "text_editor" {
+            let arguments: Value = serde_json::from_str(&call.function.arguments)
+                .context("tool arguments must be valid JSON")?;
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .context("text_editor path must be a string")?;
+            self.policy.check_write(path)?;
+        }
         tool.call(Value::Object(arguments.clone())).await
     }
 
@@ -300,6 +396,38 @@ mod tests {
             },
         };
         assert_eq!(tools.call(&call).await, r#"{"value":42}"#);
+    }
+
+    #[tokio::test]
+    async fn task_policy_exposes_tools_and_denies_unapproved_operations() {
+        let denied = Tools::with_policy(PermissionPolicy::new(Vec::new(), Vec::new()));
+        let names: Vec<_> = denied
+            .definitions()
+            .iter()
+            .map(|definition| definition["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["echo", "read_file", "text_editor"]);
+
+        let read_only =
+            Tools::with_policy(PermissionPolicy::new(vec![PathBuf::from(".")], Vec::new()));
+        let names: Vec<_> = read_only
+            .definitions()
+            .iter()
+            .map(|definition| definition["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["echo", "read_file", "text_editor"]);
+        let call = ToolCall {
+            id: "denied".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "read_file".into(),
+                arguments: r#"{"path":"Cargo.toml","offset":0,"limit":1}"#.into(),
+            },
+        };
+        assert!(
+            denied.call(&call).await.contains("permission denied"),
+            "permission errors should be returned as tool results"
+        );
     }
 
     #[tokio::test]

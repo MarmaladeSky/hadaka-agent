@@ -9,12 +9,25 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use crate::{agent::Agent, cli::Cli, config::Config, model::DeepSeek, tools::Tools};
+use crate::{
+    agent::Agent,
+    cli::{Cli, Mode},
+    config::Config,
+    model::DeepSeek,
+    tools::{PermissionPolicy, Tools},
+};
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let mut tools = Tools::new();
+    let policy = match &cli.command {
+        Mode::Run {
+            allow_read,
+            allow_write,
+            ..
+        } => PermissionPolicy::new(allow_read.clone(), allow_write.clone()),
+    };
+    let mut tools = Tools::with_policy(policy);
     let mut interrupted = false;
     let result = tokio::select! {
         result = execute(cli, &mut tools) => result,
@@ -64,6 +77,7 @@ async fn execute(cli: Cli, tools: &mut Tools) -> Result<()> {
         task,
         format,
         verbose,
+        ..
     } = cli.command;
     agent
         .run_with_options(&task, tools, &mut std::io::stdout(), format, verbose)

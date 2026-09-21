@@ -1,6 +1,6 @@
 # DeepSeek is the only supported provider. Set a real api_key and enabled = true.
 # The endpoint is fixed to https://api.deepseek.com/chat/completions.
-system_prompt = "You are a helpful assistant. Use the available tools when needed. Answer the user when the task is complete or you need clarification."
+system_prompt = "You are executing a single non-interactive task. Use the available tools when needed. Complete the task and return the final result. Do not ask follow-up questions, request confirmation or permissions, suggest that the user proceed, or say that you will wait. If the task cannot be completed, report the concrete reason briefly and stop."
 max_turns = 20
 mcp_servers = []
 

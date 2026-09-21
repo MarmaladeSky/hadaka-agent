@@ -10,7 +10,13 @@ use std::{
 
 use serde_json::{Value, json};
 
-use crate::{agent::Agent, cli::OutputFormat, config::Config, model::DeepSeek, tools::Tools};
+use crate::{
+    agent::Agent,
+    cli::OutputFormat,
+    config::Config,
+    model::DeepSeek,
+    tools::{PermissionPolicy, Tools},
+};
 
 struct Mock {
     endpoint: String,
@@ -233,8 +239,12 @@ async fn agent_reads_a_file_range() {
         answer("Read second line"),
     ]);
     let mut output = Vec::new();
+    let tools = Tools::with_policy(PermissionPolicy::new(
+        vec![dir.path().to_path_buf()],
+        Vec::new(),
+    ));
     mock.agent("")
-        .run("Read the second line", &Tools::new(), &mut output)
+        .run("Read the second line", &tools, &mut output)
         .await
         .unwrap();
     let requests = mock.finish();

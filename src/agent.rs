@@ -9,6 +9,8 @@ use crate::{
     tools::Tools,
 };
 
+const NON_INTERACTIVE_RULES: &str = "This is a single non-interactive task with no follow-up conversation. Do not ask questions, request confirmation or permissions, suggest that the user proceed, or say that the user should let you know. If a required operation is unavailable or denied, report the concrete failure briefly and stop.";
+
 pub struct Agent {
     model: DeepSeek,
     system_prompt: String,
@@ -19,7 +21,7 @@ impl Agent {
     pub fn new(model: DeepSeek, system_prompt: String, max_turns: usize) -> Self {
         Self {
             model,
-            system_prompt,
+            system_prompt: format!("{system_prompt}\n\n{NON_INTERACTIVE_RULES}"),
             max_turns,
         }
     }

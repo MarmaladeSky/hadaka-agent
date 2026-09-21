@@ -35,5 +35,11 @@ pub enum Mode {
         format: OutputFormat,
         #[arg(short = 'v', long)]
         verbose: bool,
+        /// Allow the task to read files below this path. Repeatable; omitted means denied.
+        #[arg(long = "allow-read", value_name = "PATH")]
+        allow_read: Vec<PathBuf>,
+        /// Allow the task to create or modify files below this path. Repeatable; omitted means denied.
+        #[arg(long = "allow-write", value_name = "PATH")]
+        allow_write: Vec<PathBuf>,
     },
 }

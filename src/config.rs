@@ -33,7 +33,7 @@ pub struct Provider {
 }
 
 fn default_system_prompt() -> String {
-    "You are a helpful assistant. Use the available tools when needed. Answer the user when the task is complete or you need clarification.".into()
+    "You are executing a single non-interactive task. Use the available tools when needed. Complete the task and return the final result. Do not ask follow-up questions, request confirmation or permissions, suggest that the user proceed, or say that you will wait. If the task cannot be completed, report the concrete reason briefly and stop.".into()
 }
 
 fn default_max_turns() -> usize {
