@@ -8,6 +8,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 eventsource-stream = "0.2"
 futures-util = "0.3"
+globset = "0.4"
 html2text = "0.17"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 rmcp = { version = "3.4", default-features = false, features = ["client", "transport-async-rw"] }

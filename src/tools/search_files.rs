@@ -1,6 +1,7 @@
 use std::{fs, path::Path};
 
 use anyhow::{Context, Result, ensure};
+use globset::{Glob, GlobMatcher};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -35,7 +36,7 @@ impl Tool for SearchFiles {
     }
 
     fn description(&self) -> &str {
-        "Search recursively for a literal, case-sensitive query in UTF-8 text files. query and path are required; use path '.' explicitly to search the working directory. glob optionally filters file names (simple * wildcards). max_results defaults to 100 and is limited to 1000. context_lines includes up to 10 surrounding lines. Symlinked directories are not followed."
+        "Search recursively for a literal, case-sensitive query in UTF-8 text files. query and path are required; use path '.' explicitly to search the working directory. glob optionally filters file names, not relative paths, using case-sensitive globset syntax (*, ?, [ab], {a,b}); invalid patterns return an error. max_results defaults to 100 and is limited to 1000. context_lines includes up to 10 surrounding lines. Symlinked directories are not followed."
     }
 
     fn parameters(&self) -> Value {
@@ -44,7 +45,7 @@ impl Tool for SearchFiles {
             "properties": {
                 "query": {"type": "string", "minLength": 1},
                 "path": {"type": "string"},
-                "glob": {"type": "string", "description": "Optional file-name filter, for example *.rs or Cargo.toml."},
+                "glob": {"type": "string", "description": "Optional case-sensitive globset pattern matched against file names, not relative paths; for example *.rs, test?.rs, or *.{rs,toml}."},
                 "max_results": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTS, "default": 100},
                 "context_lines": {"type": "integer", "minimum": 0, "maximum": MAX_CONTEXT_LINES, "default": 0}
             },
@@ -82,13 +83,22 @@ struct Match {
 }
 
 fn search(args: Arguments) -> Result<String> {
+    let matcher = args
+        .glob
+        .as_deref()
+        .map(|pattern| {
+            Glob::new(pattern)
+                .map(|glob| glob.compile_matcher())
+                .context("invalid glob pattern")
+        })
+        .transpose()?;
     let root = Path::new(&args.path);
     ensure!(
         fs::symlink_metadata(root)?.is_dir(),
         "path must refer to a directory"
     );
     let mut matches = Vec::new();
-    collect(root, root, &args, &mut matches)?;
+    collect(root, root, &args, matcher.as_ref(), &mut matches)?;
     let total_matches = matches.len();
     let truncated = total_matches > args.max_results;
     matches.truncate(args.max_results);
@@ -117,7 +127,13 @@ fn search(args: Arguments) -> Result<String> {
     .to_string())
 }
 
-fn collect(root: &Path, current: &Path, args: &Arguments, matches: &mut Vec<Match>) -> Result<()> {
+fn collect(
+    root: &Path,
+    current: &Path,
+    args: &Arguments,
+    matcher: Option<&GlobMatcher>,
+    matches: &mut Vec<Match>,
+) -> Result<()> {
     for entry in fs::read_dir(current)
         .with_context(|| format!("cannot read directory {}", current.display()))?
     {
@@ -126,15 +142,12 @@ fn collect(root: &Path, current: &Path, args: &Arguments, matches: &mut Vec<Matc
         let metadata = fs::symlink_metadata(&path)?;
         if metadata.is_dir() {
             if !metadata.file_type().is_symlink() {
-                collect(root, &path, args, matches)?;
+                collect(root, &path, args, matcher, matches)?;
             }
             continue;
         }
         if !metadata.is_file()
-            || args
-                .glob
-                .as_deref()
-                .is_some_and(|pattern| !matches_glob(&entry.file_name().to_string_lossy(), pattern))
+            || matcher.is_some_and(|matcher| !matcher.is_match(Path::new(&entry.file_name())))
         {
             continue;
         }
@@ -168,24 +181,109 @@ fn collect(root: &Path, current: &Path, args: &Arguments, matches: &mut Vec<Matc
     Ok(())
 }
 
-fn matches_glob(name: &str, pattern: &str) -> bool {
-    wildcard(name.as_bytes(), pattern.as_bytes())
-}
-
-fn wildcard(value: &[u8], pattern: &[u8]) -> bool {
-    if pattern.is_empty() {
-        return value.is_empty();
-    }
-    if pattern[0] == b'*' {
-        wildcard(value, &pattern[1..]) || (!value.is_empty() && wildcard(&value[1..], pattern))
-    } else {
-        !value.is_empty() && pattern[0] == value[0] && wildcard(&value[1..], &pattern[1..])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn supports_glob_syntax_on_file_names() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        for name in [
+            "main.rs",
+            "test1.rs",
+            "test2.rs",
+            "testx.rs",
+            "README.md",
+            "nested/lib.rs",
+        ] {
+            fs::write(dir.path().join(name), "needle\n").unwrap();
+        }
+        for (pattern, expected) in [
+            (
+                "*.rs",
+                vec![
+                    "main.rs",
+                    "nested/lib.rs",
+                    "test1.rs",
+                    "test2.rs",
+                    "testx.rs",
+                ],
+            ),
+            ("test?.rs", vec!["test1.rs", "test2.rs", "testx.rs"]),
+            ("test[12].rs", vec!["test1.rs", "test2.rs"]),
+            ("{main,lib}.rs", vec!["main.rs", "nested/lib.rs"]),
+            ("README.md", vec!["README.md"]),
+            ("*.RS", vec![]),
+            ("nested/*.rs", vec![]),
+            ("", vec![]),
+        ] {
+            let result: Value = serde_json::from_str(
+                &SearchFiles
+                    .call(json!({
+                        "query": "needle", "path": dir.path(), "glob": pattern
+                    }))
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let mut paths: Vec<_> = result["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["path"].as_str().unwrap())
+                .collect();
+            paths.sort_unstable();
+            assert_eq!(paths, expected, "pattern {pattern:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_glob_even_in_empty_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        for pattern in ["[", "{a,b"] {
+            let error = SearchFiles
+                .call(json!({
+                    "query": "needle", "path": dir.path(), "glob": pattern
+                }))
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("invalid glob pattern"));
+        }
+    }
+
+    #[tokio::test]
+    async fn handles_many_wildcards_without_recursive_backtracking() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = "a".repeat(64);
+        fs::write(dir.path().join(&name), "needle\n").unwrap();
+        for pattern in [
+            format!("{}b", "*a".repeat(24)),
+            format!("{}b", "*".repeat(24)),
+        ] {
+            let result: Value = serde_json::from_str(
+                &SearchFiles
+                    .call(json!({
+                        "query": "needle", "path": dir.path(), "glob": pattern
+                    }))
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(result["total_matches"], 0);
+        }
+        let result: Value = serde_json::from_str(
+            &SearchFiles
+                .call(json!({
+                    "query": "needle", "path": dir.path(), "glob": format!("{}*", "*a".repeat(24))
+                }))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["total_matches"], 1);
+        assert_eq!(result["matches"][0]["path"], name);
+    }
 
     #[test]
     fn requires_explicit_path() {
