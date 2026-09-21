@@ -466,6 +466,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_files_explicit_path_respects_read_permissions() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("sample.txt"), "needle\n").unwrap();
+        let allowed = Tools::with_policy(PermissionPolicy::new(
+            vec![directory.path().to_owned()],
+            vec![],
+            vec![],
+        ));
+        let denied = Tools::with_policy(PermissionPolicy::new(vec![], vec![], vec![]));
+        let mut call = ToolCall {
+            id: "search-explicit-path".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "search_files".into(),
+                arguments: json!({"query": "needle", "path": directory.path()}).to_string(),
+            },
+        };
+        let result = allowed.call(&call).await;
+        let result: Value = serde_json::from_str(&result)
+            .unwrap_or_else(|_| panic!("expected search results, got: {result}"));
+        assert_eq!(result["total_matches"], 1);
+        assert_eq!(result["matches"][0]["path"], "sample.txt");
+        assert!(denied.call(&call).await.contains("permission denied: read"));
+
+        // Missing and invalid paths must never select an implicit directory.
+        for path in [Value::Null, json!(42)] {
+            call.function.arguments = json!({"query": "needle", "path": path}).to_string();
+            assert!(
+                allowed
+                    .call(&call)
+                    .await
+                    .contains("file tool path must be a string")
+            );
+        }
+        for name in ["search_files", "read_file", "list_directory"] {
+            call.function.name = name.into();
+            call.function.arguments = json!({"query": "needle"}).to_string();
+            assert!(
+                allowed
+                    .call(&call)
+                    .await
+                    .contains("file tool path must be a string")
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn task_policy_exposes_tools_and_denies_unapproved_operations() {
         let denied = Tools::with_policy(PermissionPolicy::new(Vec::new(), Vec::new(), Vec::new()));
         let names: Vec<_> = denied

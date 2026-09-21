@@ -14,7 +14,6 @@ const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 #[serde(deny_unknown_fields)]
 struct Arguments {
     query: String,
-    #[serde(default = "default_path")]
     path: String,
     #[serde(default)]
     glob: Option<String>,
@@ -24,9 +23,6 @@ struct Arguments {
     context_lines: usize,
 }
 
-fn default_path() -> String {
-    ".".into()
-}
 fn default_max_results() -> usize {
     100
 }
@@ -39,7 +35,7 @@ impl Tool for SearchFiles {
     }
 
     fn description(&self) -> &str {
-        "Search recursively for a literal, case-sensitive query in UTF-8 text files. path defaults to the working directory. glob optionally filters file names (simple * wildcards). max_results defaults to 100 and is limited to 1000. context_lines includes up to 10 surrounding lines. Symlinked directories are not followed."
+        "Search recursively for a literal, case-sensitive query in UTF-8 text files. query and path are required; use path '.' explicitly to search the working directory. glob optionally filters file names (simple * wildcards). max_results defaults to 100 and is limited to 1000. context_lines includes up to 10 surrounding lines. Symlinked directories are not followed."
     }
 
     fn parameters(&self) -> Value {
@@ -47,12 +43,12 @@ impl Tool for SearchFiles {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "minLength": 1},
-                "path": {"type": "string", "default": "."},
+                "path": {"type": "string"},
                 "glob": {"type": "string", "description": "Optional file-name filter, for example *.rs or Cargo.toml."},
                 "max_results": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTS, "default": 100},
                 "context_lines": {"type": "integer", "minimum": 0, "maximum": MAX_CONTEXT_LINES, "default": 0}
             },
-            "required": ["query"],
+            "required": ["query", "path"],
             "additionalProperties": false
         })
     }
@@ -60,7 +56,7 @@ impl Tool for SearchFiles {
     fn call(&self, arguments: Value) -> BoxFuture<'_, Result<String>> {
         Box::pin(async move {
             let args: Arguments = serde_json::from_value(arguments)
-                .context("search_files expects query and optional path, glob, max_results, and context_lines")?;
+                .context("search_files expects query and path, with optional glob, max_results, and context_lines")?;
             ensure!(!args.query.is_empty(), "query must not be empty");
             ensure!(
                 (1..=MAX_RESULTS).contains(&args.max_results),
@@ -191,6 +187,19 @@ fn wildcard(value: &[u8], pattern: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn requires_explicit_path() {
+        assert!(serde_json::from_value::<Arguments>(json!({"query": "needle"})).is_err());
+        let schema = SearchFiles.parameters();
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("path"))
+        );
+        assert!(schema["properties"]["path"].get("default").is_none());
+    }
+
     #[tokio::test]
     async fn finds_literal_matches_with_glob_and_context() {
         let dir = tempfile::tempdir().unwrap();
@@ -223,7 +232,7 @@ mod tests {
     async fn validates_limits_and_empty_queries() {
         let dir = tempfile::tempdir().unwrap();
         for arguments in [
-            json!({"query": ""}),
+            json!({"query": "", "path": dir.path()}),
             json!({"query": "x", "path": dir.path(), "max_results": 0}),
             json!({"query": "x", "path": dir.path(), "context_lines": MAX_CONTEXT_LINES + 1}),
         ] {

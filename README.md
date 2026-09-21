@@ -17,7 +17,7 @@ Running the program executes one task non-interactively and exits. It accepts `-
 
 The built-in `list_directory` tool lists entries below a path with an optional `depth` (default 1, maximum 8). It reports files, directories, symlinks, and file sizes; symlinks are never followed. It uses the same read permission as `read_file`.
 
-The built-in `search_files` tool recursively searches UTF-8 files for a literal, case-sensitive query. It accepts an optional path, simple filename glob, result limit, and surrounding context-line count. It uses the same read permission and does not follow symlinked directories.
+The built-in `search_files` tool recursively searches UTF-8 files for a literal, case-sensitive query. Both `query` and `path` are required; explicitly pass `"path": "."` to search the working directory. Optional arguments include a simple filename glob, result limit, and surrounding context-line count. It uses the same read permission and does not follow symlinked directories.
 
 The built-in `run_command` tool executes an approved program directly, without a shell. It accepts `program`, optional `args`, optional `cwd`, and a timeout (default 120 seconds, maximum 300 seconds). Its working directory must also be covered by `--allow-read`. It captures stdout and stderr with 64 KiB limits. Programs require explicit repeatable `--allow-exec PROGRAM` permission.
 
