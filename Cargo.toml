@@ -10,6 +10,7 @@ eventsource-stream = "0.2"
 futures-util = "0.3"
 globset = "0.4"
 html2text = "0.17"
+process-wrap = { version = "10", default-features = false, features = ["tokio1", "kill-on-drop", "process-group", "job-object"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 rmcp = { version = "3.4", default-features = false, features = ["client", "transport-async-rw"] }
 serde = { version = "1", features = ["derive"] }

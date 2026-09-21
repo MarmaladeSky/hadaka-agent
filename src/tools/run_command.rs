@@ -1,9 +1,18 @@
-use std::{process::Stdio, time::Duration};
+use std::{
+    process::Stdio,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
+#[cfg(windows)]
+use process_wrap::tokio::JobObject;
+#[cfg(unix)]
+use process_wrap::tokio::ProcessGroup;
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::{process::Command, time::timeout};
+use tokio::{io::AsyncReadExt, process::Command, task::JoinHandle, time::timeout};
 
 use super::{BoxFuture, Tool};
 
@@ -27,7 +36,74 @@ fn default_timeout() -> u64 {
     DEFAULT_TIMEOUT_MS
 }
 
-pub(super) struct RunCommand;
+#[derive(Clone, Default)]
+pub(super) struct RunCommand {
+    cleanup: Arc<Mutex<Vec<JoinHandle<Result<()>>>>>,
+}
+
+impl RunCommand {
+    pub(super) async fn shutdown(&self) -> Result<()> {
+        let tasks = std::mem::take(&mut *self.cleanup.lock().unwrap());
+        let mut errors = Vec::new();
+        for task in tasks {
+            match task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => errors.push(format!("{error:#}")),
+                Err(error) => errors.push(error.to_string()),
+            }
+        }
+        ensure!(
+            errors.is_empty(),
+            "command cleanup failed: {}",
+            errors.join("; ")
+        );
+        Ok(())
+    }
+}
+
+// Own the process tree independently of the cancellable output-reading future.
+// Drop signals it synchronously; Tools::shutdown awaits the queued reaping work.
+struct OwnedCommand {
+    child: Option<Box<dyn ChildWrapper>>,
+    owner: RunCommand,
+}
+
+fn start_termination(child: &mut dyn ChildWrapper) -> Result<()> {
+    if let Err(error) = child.start_kill() {
+        // A command that exited normally may no longer have a process group.
+        if child.try_wait()?.is_none() {
+            return Err(error).context("cannot terminate command tree");
+        }
+    }
+    Ok(())
+}
+
+impl OwnedCommand {
+    async fn finish(&mut self) -> Result<()> {
+        let child = self.child.as_mut().unwrap();
+        start_termination(child.as_mut())?;
+        child.wait().await.context("cannot reap command")?;
+        self.child.take();
+        Ok(())
+    }
+}
+
+impl Drop for OwnedCommand {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let termination = start_termination(child.as_mut());
+            let task = tokio::spawn(async move {
+                termination?;
+                child
+                    .wait()
+                    .await
+                    .context("cannot reap cancelled command")?;
+                Ok(())
+            });
+            self.owner.cleanup.lock().unwrap().push(task);
+        }
+    }
+}
 
 impl Tool for RunCommand {
     fn name(&self) -> &str {
@@ -67,15 +143,48 @@ impl Tool for RunCommand {
             if let Some(cwd) = args.cwd {
                 command.current_dir(cwd);
             }
-            let output = timeout(Duration::from_millis(args.timeout_ms), command.output())
-                .await
-                .context("command timed out")?
+            let mut command = CommandWrap::from(command);
+            command.wrap(KillOnDrop);
+            #[cfg(unix)]
+            command.wrap(ProcessGroup::leader());
+            #[cfg(windows)]
+            command.wrap(JobObject);
+            let child = command
+                .spawn()
                 .with_context(|| format!("cannot execute {}", args.program))?;
-            let stdout = truncate(output.stdout);
-            let stderr = truncate(output.stderr);
+            let mut owned = OwnedCommand {
+                child: Some(child),
+                owner: self.clone(),
+            };
+            let child = owned.child.as_mut().unwrap();
+            let mut stdout_pipe = child
+                .stdout()
+                .take()
+                .context("command stdout unavailable")?;
+            let mut stderr_pipe = child
+                .stderr()
+                .take()
+                .context("command stderr unavailable")?;
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let output = timeout(Duration::from_millis(args.timeout_ms), async {
+                tokio::try_join!(
+                    child.wait(),
+                    stdout_pipe.read_to_end(&mut stdout),
+                    stderr_pipe.read_to_end(&mut stderr)
+                )
+            })
+            .await;
+            owned.finish().await.context("command cleanup failed")?;
+            let status = match output {
+                Ok(result) => result.context("cannot collect command output")?.0,
+                Err(_) => bail!("command timed out"),
+            };
+            let stdout = truncate(stdout);
+            let stderr = truncate(stderr);
             Ok(json!({
-                "exit_code": output.status.code(),
-                "success": output.status.success(),
+                "exit_code": status.code(),
+                "success": status.success(),
                 "stdout": stdout.text,
                 "stderr": stderr.text,
                 "stdout_truncated": stdout.truncated,
@@ -105,9 +214,151 @@ fn truncate(bytes: Vec<u8>) -> Truncated {
 mod tests {
     use super::*;
 
+    // A portable subprocess fixture that also launches a descendant. Both wait
+    // for the test to release them before attempting their observable writes.
+    #[test]
+    #[ignore = "subprocess fixture"]
+    fn process_cleanup_fixture() {
+        let dir = std::path::PathBuf::from(std::env::var_os("HADAKA_PROCESS_FIXTURE_DIR").unwrap());
+        let role = std::env::var("HADAKA_PROCESS_FIXTURE_ROLE").unwrap();
+        let mut child = if role == "parent" {
+            Some(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--ignored",
+                        "--exact",
+                        "tools::run_command::tests::process_cleanup_fixture",
+                    ])
+                    .env("HADAKA_PROCESS_FIXTURE_ROLE", "descendant")
+                    .spawn()
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        std::fs::write(
+            dir.join(format!("{role}.pid")),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        if role == "parent" && std::env::var("HADAKA_PROCESS_FIXTURE_EXIT").as_deref() == Ok("1") {
+            while !dir.join("descendant.pid").exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // Deliberately orphan the descendant to exercise cleanup after the
+            // group leader exits. The test's command owner must terminate it.
+            drop(child);
+            return;
+        }
+        while !dir.join("release").exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(dir.join(format!("{role}.wrote")), "survived").unwrap();
+        if let Some(child) = &mut child {
+            child.wait().unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_fixture(dir: &std::path::Path) {
+        timeout(Duration::from_secs(5), async {
+            while !dir.join("parent.pid").exists() || !dir.join("descendant.pid").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fixture must start before testing cleanup");
+    }
+
+    #[cfg(unix)]
+    async fn check_process_cleanup(cancel: bool, parent_exits: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        // Launch the fixture through a shell solely to set its environment;
+        // exec ensures the fixture itself is the tool's direct child.
+        let arguments = json!({
+            "program": "sh",
+            "args": ["-c", "export HADAKA_PROCESS_FIXTURE_DIR=\"$1\" HADAKA_PROCESS_FIXTURE_ROLE=parent HADAKA_PROCESS_FIXTURE_EXIT=\"$3\"; exec \"$2\" --ignored --exact tools::run_command::tests::process_cleanup_fixture", "fixture", dir.path(), std::env::current_exe().unwrap(), if parent_exits { "1" } else { "0" }],
+            "timeout_ms": if cancel { 10_000 } else { 1_500 }
+        });
+        let runner = RunCommand::default();
+        let task_runner = runner.clone();
+        let task = tokio::spawn(async move { task_runner.call(arguments).await });
+        wait_for_fixture(dir.path()).await;
+        if parent_exits {
+            let pid = std::fs::read_to_string(dir.path().join("parent.pid")).unwrap();
+            timeout(Duration::from_secs(5), async {
+                while std::process::Command::new("kill")
+                    .args(["-0", pid.trim()])
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("group leader must exit before testing cleanup");
+        }
+        if cancel {
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        } else {
+            let error = task.await.unwrap().unwrap_err();
+            assert!(format!("{error:#}").contains("command timed out"));
+        }
+        runner.shutdown().await.unwrap();
+        std::fs::write(dir.path().join("release"), "go").unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        for role in ["parent", "descendant"] {
+            assert!(
+                !dir.path().join(format!("{role}.wrote")).exists(),
+                "{role} wrote after cleanup"
+            );
+        }
+        #[cfg(unix)]
+        {
+            let pid = std::fs::read_to_string(dir.path().join("parent.pid")).unwrap();
+            let status = std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(
+                !status.success(),
+                "direct child must be terminated and reaped"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_terminates_command_and_descendants() {
+        check_process_cleanup(false, false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_terminates_command_and_descendants() {
+        check_process_cleanup(true, false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_terminates_descendants_after_parent_exits() {
+        check_process_cleanup(false, true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_terminates_descendants_after_parent_exits() {
+        check_process_cleanup(true, true).await;
+    }
+
     #[tokio::test]
     async fn runs_argv_without_a_shell_and_captures_output() {
-        let result: Value = RunCommand
+        let result: Value = RunCommand::default()
             .call(json!({
                 "program": "printf", "args": ["hello"]
             }))
@@ -124,12 +375,12 @@ mod tests {
     #[tokio::test]
     async fn validates_timeout_and_reports_failures() {
         assert!(
-            RunCommand
+            RunCommand::default()
                 .call(json!({"program":"printf", "timeout_ms": 0}))
                 .await
                 .is_err()
         );
-        let result: Value = RunCommand
+        let result: Value = RunCommand::default()
             .call(json!({"program":"sh", "args":["-c", "exit 7"]}))
             .await
             .unwrap()

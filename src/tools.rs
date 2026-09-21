@@ -194,6 +194,7 @@ pub struct Tools {
     routes: HashMap<String, Box<dyn Tool>>,
     sessions: Vec<Session>,
     policy: PermissionPolicy,
+    command_runner: run_command::RunCommand,
 }
 
 impl Tools {
@@ -208,6 +209,7 @@ impl Tools {
             routes: HashMap::new(),
             sessions: Vec::new(),
             policy: policy.clone(),
+            command_runner: run_command::RunCommand::default(),
         };
         tools
             .register(echo::Echo)
@@ -219,7 +221,7 @@ impl Tools {
             .register(search_files::SearchFiles)
             .expect("unique built-in tool name");
         tools
-            .register(run_command::RunCommand)
+            .register(tools.command_runner.clone())
             .expect("unique built-in tool name");
         tools
             .register(read_file::ReadFile)
@@ -355,6 +357,9 @@ impl Tools {
 
     pub async fn shutdown(&mut self) -> Result<()> {
         let mut errors = Vec::new();
+        if let Err(error) = self.command_runner.shutdown().await {
+            errors.push(format!("{error:#}"));
+        }
         for session in &mut self.sessions {
             if let Some(client) = &mut session.client {
                 match client.close_with_timeout(SHUTDOWN_TIMEOUT).await {
