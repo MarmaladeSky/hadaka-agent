@@ -19,7 +19,9 @@ The built-in `list_directory` tool lists entries below a path with an optional `
 
 The built-in `search_files` tool recursively searches UTF-8 files for a literal, case-sensitive query. It accepts an optional path, simple filename glob, result limit, and surrounding context-line count. It uses the same read permission and does not follow symlinked directories.
 
-File permissions are task-scoped and deny-by-default. Use repeatable `--allow-read PATH` and `--allow-write PATH` flags; omitted flags grant no file access. The model always receives the built-in file tools, but each operation is checked at execution time and returns a permission error when access was not granted. Read and write permissions are independent. Paths are resolved relative to the launch directory, canonicalized, and checked before each operation. Path traversal and symlink escapes are denied. MCP permissions are not yet restricted by these flags.
+The built-in `run_command` tool executes an approved program directly, without a shell. It accepts `program`, optional `args`, optional `cwd`, and a timeout (default 120 seconds, maximum 300 seconds). Its working directory must also be covered by `--allow-read`. It captures stdout and stderr with 64 KiB limits. Programs require explicit repeatable `--allow-exec PROGRAM` permission.
+
+File and executable permissions are task-scoped and deny-by-default. Use repeatable `--allow-read PATH`, `--allow-write PATH`, and `--allow-exec PROGRAM` flags; omitted flags grant no corresponding access. The model always receives the built-in tools, but each operation is checked at execution time and returns a permission error when access was not granted. Read and write permissions are independent. Commands are executed without a shell and must match an explicitly allowed program name. Paths are resolved relative to the launch directory, canonicalized, and checked before each operation. Path traversal and symlink escapes are denied. MCP permissions are not yet restricted by these flags.
 
 ## Tools and configuration
 

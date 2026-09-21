@@ -242,6 +242,7 @@ async fn agent_reads_a_file_range() {
     let tools = Tools::with_policy(PermissionPolicy::new(
         vec![dir.path().to_path_buf()],
         Vec::new(),
+        Vec::new(),
     ));
     mock.agent("")
         .run("Read the second line", &tools, &mut output)
@@ -524,6 +525,7 @@ async fn mcp_discovers_pages_routes_calls_and_reaps_subprocess() {
             "echo",
             "list_directory",
             "search_files",
+            "run_command",
             "read_file",
             "text_editor",
             "mcp_fixture__echo",

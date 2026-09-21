@@ -30,6 +30,7 @@ struct Session {
 mod echo;
 mod list_directory;
 mod read_file;
+mod run_command;
 mod search_files;
 mod text_editor;
 
@@ -48,19 +49,29 @@ pub trait Tool: Send + Sync {
 pub struct PermissionPolicy {
     read_roots: Vec<PathBuf>,
     write_roots: Vec<PathBuf>,
+    exec_programs: Vec<String>,
 }
 
 impl PermissionPolicy {
-    pub fn new(read_roots: Vec<PathBuf>, write_roots: Vec<PathBuf>) -> Self {
+    pub fn new(
+        read_roots: Vec<PathBuf>,
+        write_roots: Vec<PathBuf>,
+        exec_programs: Vec<String>,
+    ) -> Self {
         Self {
             read_roots: normalize_roots(read_roots),
             write_roots: normalize_roots(write_roots),
+            exec_programs,
         }
     }
 
     #[cfg(test)]
     fn allow_all() -> Self {
-        Self::new(vec![PathBuf::from(".")], vec![PathBuf::from(".")])
+        Self::new(
+            vec![PathBuf::from(".")],
+            vec![PathBuf::from(".")],
+            vec!["cargo".into(), "rustfmt".into(), "git".into()],
+        )
     }
 
     fn check(&self, path: &str, roots: &[PathBuf], operation: &str) -> Result<()> {
@@ -79,6 +90,14 @@ impl PermissionPolicy {
 
     fn check_write(&self, path: &str) -> Result<()> {
         self.check(path, &self.write_roots, "write")
+    }
+
+    fn check_exec(&self, program: &str) -> Result<()> {
+        ensure!(
+            self.exec_programs.iter().any(|allowed| allowed == program),
+            "permission denied: execute `{program}` is not allowed"
+        );
+        Ok(())
     }
 }
 
@@ -177,6 +196,9 @@ impl Tools {
             .expect("unique built-in tool name");
         tools
             .register(search_files::SearchFiles)
+            .expect("unique built-in tool name");
+        tools
+            .register(run_command::RunCommand)
             .expect("unique built-in tool name");
         tools
             .register(read_file::ReadFile)
@@ -293,6 +315,16 @@ impl Tools {
                 .and_then(Value::as_str)
                 .context("text_editor path must be a string")?;
             self.policy.check_write(path)?;
+        } else if call.function.name == "run_command" {
+            let arguments: Value = serde_json::from_str(&call.function.arguments)
+                .context("tool arguments must be valid JSON")?;
+            let program = arguments
+                .get("program")
+                .and_then(Value::as_str)
+                .context("run_command program must be a string")?;
+            self.policy.check_exec(program)?;
+            let cwd = arguments.get("cwd").and_then(Value::as_str).unwrap_or(".");
+            self.policy.check_read(cwd)?;
         }
         tool.call(Value::Object(arguments.clone())).await
     }
@@ -411,7 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_policy_exposes_tools_and_denies_unapproved_operations() {
-        let denied = Tools::with_policy(PermissionPolicy::new(Vec::new(), Vec::new()));
+        let denied = Tools::with_policy(PermissionPolicy::new(Vec::new(), Vec::new(), Vec::new()));
         let names: Vec<_> = denied
             .definitions()
             .iter()
@@ -423,13 +455,17 @@ mod tests {
                 "echo",
                 "list_directory",
                 "search_files",
+                "run_command",
                 "read_file",
                 "text_editor"
             ]
         );
 
-        let read_only =
-            Tools::with_policy(PermissionPolicy::new(vec![PathBuf::from(".")], Vec::new()));
+        let read_only = Tools::with_policy(PermissionPolicy::new(
+            vec![PathBuf::from(".")],
+            Vec::new(),
+            Vec::new(),
+        ));
         let names: Vec<_> = read_only
             .definitions()
             .iter()
@@ -441,6 +477,7 @@ mod tests {
                 "echo",
                 "list_directory",
                 "search_files",
+                "run_command",
                 "read_file",
                 "text_editor"
             ]
@@ -457,6 +494,15 @@ mod tests {
             denied.call(&call).await.contains("permission denied"),
             "permission errors should be returned as tool results"
         );
+        let command = ToolCall {
+            id: "command-denied".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "run_command".into(),
+                arguments: r#"{"program":"printf","args":["ok"]}"#.into(),
+            },
+        };
+        assert!(denied.call(&command).await.contains("permission denied"));
     }
 
     #[tokio::test]

@@ -20,7 +20,11 @@ use crate::{
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let policy = PermissionPolicy::new(cli.allow_read.clone(), cli.allow_write.clone());
+    let policy = PermissionPolicy::new(
+        cli.allow_read.clone(),
+        cli.allow_write.clone(),
+        cli.allow_exec.clone(),
+    );
     let mut tools = Tools::with_policy(policy);
     let mut interrupted = false;
     let result = tokio::select! {
