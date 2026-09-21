@@ -59,11 +59,42 @@ fn wait(mut child: Child) -> Output {
 #[test]
 fn only_task_execution_is_available() {
     let dir = tempfile::tempdir().unwrap();
-    for args in [vec![], vec!["chat"], vec!["run"]] {
+    for args in [vec![], vec!["--unknown"], vec!["--format"]] {
         let output = wait(command(&dir).args(args).spawn().unwrap());
         assert_eq!(output.status.code(), Some(2));
         assert!(!dir.path().join(".config").exists());
     }
+}
+
+#[test]
+fn help_lists_tools_and_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = command(&dir).arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    for text in [
+        "echo",
+        "list_directory",
+        "read_file",
+        "text_editor",
+        "--allow-read",
+        "--allow-write",
+        "denied by default",
+    ] {
+        assert!(help.contains(text), "help is missing {text:?}: {help}");
+    }
+}
+
+#[test]
+fn top_level_help_lists_tools_and_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = command(&dir).arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("AVAILABLE TOOLS:"));
+    assert!(help.contains("list_directory"));
+    assert!(help.contains("--allow-read PATH"));
+    assert!(help.contains("--allow-write PATH"));
 }
 
 #[cfg(unix)]
@@ -74,7 +105,7 @@ fn ctrl_c_during_task_startup_reaps_mcp_process() {
     let mut child = command(&dir)
         .env("FIXTURE_PID_FILE", &pid_file)
         .env("FIXTURE_HANG_ON_START", "1")
-        .args(["run", "hello"])
+        .args(["hello"])
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -110,7 +141,7 @@ fn missing_default_config_is_created() {
     let path = dir.path().join(".config/hadaka-agent/config.toml");
     let output = wait(
         command(&dir)
-            .args(["run", "hello"])
+            .args(["hello"])
             .env_remove("DEEPSEEK_API_KEY")
             .spawn()
             .unwrap(),
@@ -139,7 +170,7 @@ fn missing_explicit_config_is_not_created() {
     let dir = tempfile::tempdir().unwrap();
     let output = wait(
         command(&dir)
-            .args(["run", "hello", "--config", "missing.toml"])
+            .args(["hello", "--config", "missing.toml"])
             .spawn()
             .unwrap(),
     );
@@ -166,7 +197,7 @@ fn empty_config_requires_provider_setup() {
         for explicit in [false, true] {
             for key in [None, Some("test-key")] {
                 let mut cmd = command(&dir);
-                cmd.args(["run", "hello"]).env_remove("DEEPSEEK_API_KEY");
+                cmd.args(["hello"]).env_remove("DEEPSEEK_API_KEY");
                 if explicit {
                     cmd.arg("--config").arg(&explicit_path);
                 }
@@ -195,7 +226,7 @@ fn disabled_provider_does_not_start_mcp_servers() {
     let pid_file = dir.path().join("pid");
     let output = wait(
         command(&dir)
-            .args(["run", "hello"])
+            .args(["hello"])
             .env("FIXTURE_PID_FILE", &pid_file)
             .spawn()
             .unwrap(),
@@ -212,7 +243,7 @@ fn invalid_config_is_not_treated_as_empty() {
     let dir = config("");
     for source in ["model =", "model = 'deepseek-flash'", "unknown = true"] {
         std::fs::write(dir.path().join(".config/hadaka-agent/config.toml"), source).unwrap();
-        let output = wait(command(&dir).args(["run", "hello"]).spawn().unwrap());
+        let output = wait(command(&dir).args(["hello"]).spawn().unwrap());
         assert_eq!(output.status.code(), Some(1));
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(error.contains("invalid agent configuration"), "{error}");
@@ -247,7 +278,7 @@ fn requires_a_nonblank_config_key_even_when_environment_keys_are_set() {
         )
         .unwrap();
         let mut cmd = command(&dir);
-        cmd.args(["run", "hello"])
+        cmd.args(["hello"])
             .env("DEEPSEEK_API_KEY", "environment-key")
             .env("HADAKA_API_KEY", "legacy-key");
         let output = wait(cmd.spawn().unwrap());
@@ -264,7 +295,7 @@ fn requires_a_nonblank_config_key_even_when_environment_keys_are_set() {
 fn rejects_generic_provider_configuration() {
     for source in ["base_url = 'http://localhost/v1'", "provider = 'other'"] {
         let dir = config(source);
-        let output = wait(command(&dir).args(["run", "hello"]).spawn().unwrap());
+        let output = wait(command(&dir).args(["hello"]).spawn().unwrap());
         assert_eq!(output.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&output.stderr).contains("unknown field"));
     }
@@ -297,7 +328,7 @@ fn mcp_naming_collisions_fail_startup_and_clean_up() {
         command(&dir)
             .env("FIXTURE_PID_FILE", &pid_file)
             .env("FIXTURE_COLLISION", "1")
-            .args(["run", "task"])
+            .args(["task"])
             .spawn()
             .unwrap(),
     );

@@ -11,7 +11,7 @@ use clap::Parser;
 
 use crate::{
     agent::Agent,
-    cli::{Cli, Mode},
+    cli::Cli,
     config::Config,
     model::DeepSeek,
     tools::{PermissionPolicy, Tools},
@@ -20,13 +20,7 @@ use crate::{
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let policy = match &cli.command {
-        Mode::Run {
-            allow_read,
-            allow_write,
-            ..
-        } => PermissionPolicy::new(allow_read.clone(), allow_write.clone()),
-    };
+    let policy = PermissionPolicy::new(cli.allow_read.clone(), cli.allow_write.clone());
     let mut tools = Tools::with_policy(policy);
     let mut interrupted = false;
     let result = tokio::select! {
@@ -56,7 +50,14 @@ async fn main() -> ExitCode {
 }
 
 async fn execute(cli: Cli, tools: &mut Tools) -> Result<()> {
-    let config_path = match cli.config {
+    let cli::Cli {
+        config,
+        task,
+        format,
+        verbose,
+        ..
+    } = cli;
+    let config_path = match config {
         Some(path) => path,
         None => {
             let path = config::default_path();
@@ -73,12 +74,6 @@ async fn execute(cli: Cli, tools: &mut Tools) -> Result<()> {
     let model = DeepSeek::new(provider)?;
     tools.connect(&config.mcp_servers).await?;
     let mut agent = Agent::new(model, config.system_prompt, config.max_turns);
-    let cli::Mode::Run {
-        task,
-        format,
-        verbose,
-        ..
-    } = cli.command;
     agent
         .run_with_options(&task, tools, &mut std::io::stdout(), format, verbose)
         .await
