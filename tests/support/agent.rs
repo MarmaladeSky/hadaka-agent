@@ -554,6 +554,7 @@ async fn mcp_discovers_pages_routes_calls_and_reaps_subprocess() {
             "run_command",
             "read_file",
             "text_editor",
+            "filesystem",
             "fetch_url",
             "mcp_fixture__echo",
             "mcp_fixture__second"

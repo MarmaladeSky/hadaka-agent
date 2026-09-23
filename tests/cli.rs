@@ -92,6 +92,7 @@ fn help_lists_tools_and_permissions() {
         "read_file",
         "search_files",
         "text_editor",
+        "filesystem",
         "fetch_url",
         "--allow-net",
         "--allow-read",

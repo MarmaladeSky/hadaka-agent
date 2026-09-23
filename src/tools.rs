@@ -43,6 +43,7 @@ struct Session {
 
 mod echo;
 mod fetch_url;
+mod filesystem;
 mod list_directory;
 mod read_file;
 mod run_command;
@@ -244,6 +245,9 @@ impl Tools {
             .register(text_editor::TextEditor)
             .expect("unique built-in tool name");
         tools
+            .register(filesystem::Filesystem)
+            .expect("unique built-in tool name");
+        tools
             .register(fetch_url::FetchUrl::new(policy))
             .expect("unique built-in tool name");
         tools
@@ -347,13 +351,13 @@ impl Tools {
                 .and_then(Value::as_str)
                 .context("file tool path must be a string")?;
             self.policy.check_read(path)?;
-        } else if call.function.name == "text_editor" {
+        } else if call.function.name == "text_editor" || call.function.name == "filesystem" {
             let arguments: Value = serde_json::from_str(&call.function.arguments)
                 .context("tool arguments must be valid JSON")?;
             let path = arguments
                 .get("path")
                 .and_then(Value::as_str)
-                .context("text_editor path must be a string")?;
+                .context("write tool path must be a string")?;
             self.policy.check_write(path)?;
         } else if call.function.name == "run_command" {
             let arguments: Value = serde_json::from_str(&call.function.arguments)
@@ -548,6 +552,7 @@ mod tests {
                 "run_command",
                 "read_file",
                 "text_editor",
+                "filesystem",
                 "fetch_url"
             ]
         );
@@ -571,6 +576,7 @@ mod tests {
                 "run_command",
                 "read_file",
                 "text_editor",
+                "filesystem",
                 "fetch_url"
             ]
         );
