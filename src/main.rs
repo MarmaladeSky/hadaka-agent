@@ -16,6 +16,7 @@ mod agent;
 mod cli;
 mod config;
 mod model;
+mod output;
 mod tools;
 
 use std::process::ExitCode;
@@ -27,7 +28,7 @@ use crate::{
     agent::Agent,
     cli::Cli,
     config::Config,
-    model::DeepSeek,
+    model::deepseek::DeepSeek,
     tools::{PermissionPolicy, Tools},
 };
 
@@ -92,7 +93,7 @@ async fn execute(cli: Cli, tools: &mut Tools) -> Result<()> {
     let provider = config.enabled_provider().context(setup_message)?;
     let model = DeepSeek::new(provider)?;
     tools.connect(&config.mcp_servers).await?;
-    let mut agent = Agent::new(model, config.system_prompt, config.max_turns);
+    let mut agent = Agent::new(Box::new(model), config.system_prompt, config.max_turns);
     agent
         .run_with_options(&task, tools, &mut std::io::stdout(), format, verbose)
         .await

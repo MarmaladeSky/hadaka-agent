@@ -189,7 +189,7 @@ fn execute(args: Arguments) -> Result<String> {
 mod tests {
     use super::*;
     use crate::{
-        model::{FunctionCall, ToolCall},
+        model::ToolCall,
         tools::{PermissionPolicy, Tools},
     };
 
@@ -310,11 +310,8 @@ mod tests {
         tools
             .call(&ToolCall {
                 id: "filesystem-test".into(),
-                kind: "function".into(),
-                function: FunctionCall {
-                    name: "filesystem".into(),
-                    arguments: args.to_string(),
-                },
+                name: "filesystem".into(),
+                arguments: args.to_string(),
             })
             .await
     }

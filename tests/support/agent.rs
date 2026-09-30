@@ -28,7 +28,7 @@ use crate::{
     agent::Agent,
     cli::OutputFormat,
     config::Config,
-    model::DeepSeek,
+    model::deepseek::DeepSeek,
     tools::{PermissionPolicy, Tools},
 };
 
@@ -79,7 +79,7 @@ fn endpoint(listener: &TcpListener) -> String {
 fn agent(endpoint: &str, extra: &str) -> Agent {
     let config = config(extra);
     let model = DeepSeek::for_test(config.enabled_provider().unwrap(), endpoint.into()).unwrap();
-    Agent::new(model, config.system_prompt, config.max_turns)
+    Agent::new(Box::new(model), config.system_prompt, config.max_turns)
 }
 
 fn config(extra: &str) -> Config {
@@ -314,7 +314,7 @@ async fn verbose_diagnostics_include_input_arguments_and_results() {
 
 #[test]
 fn human_tool_result_formats_read_file_content_without_json() {
-    let result = super::agent::human_tool_result(
+    let result = super::output::human_tool_result(
         r#"{"content":"1: hello\n","total_lines":3,"has_more":true,"next_offset":1}"#,
     );
     assert_eq!(result, "1: hello\n(3 total lines, more available.)");
@@ -323,7 +323,7 @@ fn human_tool_result_formats_read_file_content_without_json() {
 
 #[test]
 fn human_web_result_shows_source_content_and_truncation() {
-    let result = super::agent::human_tool_result(
+    let result = super::output::human_tool_result(
         r#"{"final_url":"https://example.com/releases","status":200,"content_type":"application/json","title":null,"content":{"version":"2.0"},"links":[],"truncated":true,"untrusted":true}"#,
     );
     assert!(result.contains("Source: https://example.com/releases"));

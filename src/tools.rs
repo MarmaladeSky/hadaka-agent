@@ -25,13 +25,18 @@ use rmcp::{
     model::{CallToolRequestParams, CallToolResult, ContentBlock, ResourceContents},
     service::{Peer, RunningService},
 };
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use tokio::{
     process::{Child, Command},
     time::timeout,
 };
 
-use crate::{config::McpServer, model::ToolCall};
+use crate::{
+    config::McpServer,
+    model::{ToolCall, ToolDefinition},
+};
 
 const MCP_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -205,7 +210,7 @@ impl Tool for McpTool {
 }
 
 pub struct Tools {
-    definitions: Vec<Value>,
+    definitions: Vec<ToolDefinition>,
     routes: HashMap<String, Box<dyn Tool>>,
     sessions: Vec<Session>,
     policy: PermissionPolicy,
@@ -265,7 +270,7 @@ impl Tools {
         Ok(())
     }
 
-    pub fn definitions(&self) -> &[Value] {
+    pub fn definitions(&self) -> &[ToolDefinition] {
         &self.definitions
     }
 
@@ -332,35 +337,33 @@ impl Tools {
     }
 
     async fn execute(&self, call: &ToolCall) -> Result<String> {
-        let arguments: Value = serde_json::from_str(&call.function.arguments)
-            .context("tool arguments must be valid JSON")?;
+        let arguments: Value =
+            serde_json::from_str(&call.arguments).context("tool arguments must be valid JSON")?;
         let arguments = arguments
             .as_object()
             .context("tool arguments must be a JSON object")?;
-        let Some(tool) = self.routes.get(&call.function.name) else {
-            bail!("unknown tool: {}", call.function.name);
+        let Some(tool) = self.routes.get(&call.name) else {
+            bail!("unknown tool: {}", call.name);
         };
-        if call.function.name == "read_file"
-            || call.function.name == "list_directory"
-            || call.function.name == "search_files"
+        if call.name == "read_file" || call.name == "list_directory" || call.name == "search_files"
         {
-            let arguments: Value = serde_json::from_str(&call.function.arguments)
+            let arguments: Value = serde_json::from_str(&call.arguments)
                 .context("tool arguments must be valid JSON")?;
             let path = arguments
                 .get("path")
                 .and_then(Value::as_str)
                 .context("file tool path must be a string")?;
             self.policy.check_read(path)?;
-        } else if call.function.name == "text_editor" || call.function.name == "filesystem" {
-            let arguments: Value = serde_json::from_str(&call.function.arguments)
+        } else if call.name == "text_editor" || call.name == "filesystem" {
+            let arguments: Value = serde_json::from_str(&call.arguments)
                 .context("tool arguments must be valid JSON")?;
             let path = arguments
                 .get("path")
                 .and_then(Value::as_str)
                 .context("write tool path must be a string")?;
             self.policy.check_write(path)?;
-        } else if call.function.name == "run_command" {
-            let arguments: Value = serde_json::from_str(&call.function.arguments)
+        } else if call.name == "run_command" {
+            let arguments: Value = serde_json::from_str(&call.arguments)
                 .context("tool arguments must be valid JSON")?;
             let program = arguments
                 .get("program")
@@ -402,10 +405,12 @@ impl Tools {
     }
 }
 
-fn definition(name: &str, description: &str, parameters: Value) -> Value {
-    json!({"type": "function", "function": {
-        "name": name, "description": description, "parameters": parameters
-    }})
+fn definition(name: &str, description: &str, parameters: Value) -> ToolDefinition {
+    ToolDefinition {
+        name: name.into(),
+        description: description.into(),
+        parameters,
+    }
 }
 
 fn exposed_name(server: &str, tool: &str) -> String {
@@ -449,7 +454,6 @@ fn render_result(result: CallToolResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::FunctionCall;
 
     #[tokio::test]
     async fn registers_custom_tools_and_rejects_duplicates_without_changes() {
@@ -474,16 +478,13 @@ mod tests {
         let mut tools = Tools::new();
         tools.register(Custom).unwrap();
         let definitions = tools.definitions().to_vec();
-        assert_eq!(definitions.last().unwrap()["function"]["name"], "custom");
+        assert_eq!(definitions.last().unwrap().name, "custom");
         assert!(tools.register(Custom).is_err());
         assert_eq!(tools.definitions(), definitions);
         let call = ToolCall {
             id: "custom-call".into(),
-            kind: "function".into(),
-            function: FunctionCall {
-                name: "custom".into(),
-                arguments: r#"{"value":42}"#.into(),
-            },
+            name: "custom".into(),
+            arguments: r#"{"value":42}"#.into(),
         };
         assert_eq!(tools.call(&call).await, r#"{"value":42}"#);
     }
@@ -500,11 +501,8 @@ mod tests {
         let denied = Tools::with_policy(PermissionPolicy::new(vec![], vec![], vec![]));
         let mut call = ToolCall {
             id: "search-explicit-path".into(),
-            kind: "function".into(),
-            function: FunctionCall {
-                name: "search_files".into(),
-                arguments: json!({"query": "needle", "path": directory.path()}).to_string(),
-            },
+            name: "search_files".into(),
+            arguments: json!({"query": "needle", "path": directory.path()}).to_string(),
         };
         let result = allowed.call(&call).await;
         let result: Value = serde_json::from_str(&result)
@@ -515,7 +513,7 @@ mod tests {
 
         // Missing and invalid paths must never select an implicit directory.
         for path in [Value::Null, json!(42)] {
-            call.function.arguments = json!({"query": "needle", "path": path}).to_string();
+            call.arguments = json!({"query": "needle", "path": path}).to_string();
             assert!(
                 allowed
                     .call(&call)
@@ -524,8 +522,8 @@ mod tests {
             );
         }
         for name in ["search_files", "read_file", "list_directory"] {
-            call.function.name = name.into();
-            call.function.arguments = json!({"query": "needle"}).to_string();
+            call.name = name.into();
+            call.arguments = json!({"query": "needle"}).to_string();
             assert!(
                 allowed
                     .call(&call)
@@ -541,7 +539,7 @@ mod tests {
         let names: Vec<_> = denied
             .definitions()
             .iter()
-            .map(|definition| definition["function"]["name"].as_str().unwrap())
+            .map(|definition| definition.name.as_str())
             .collect();
         assert_eq!(
             names,
@@ -565,7 +563,7 @@ mod tests {
         let names: Vec<_> = read_only
             .definitions()
             .iter()
-            .map(|definition| definition["function"]["name"].as_str().unwrap())
+            .map(|definition| definition.name.as_str())
             .collect();
         assert_eq!(
             names,
@@ -582,11 +580,8 @@ mod tests {
         );
         let call = ToolCall {
             id: "denied".into(),
-            kind: "function".into(),
-            function: FunctionCall {
-                name: "read_file".into(),
-                arguments: r#"{"path":"Cargo.toml","offset":0,"limit":1}"#.into(),
-            },
+            name: "read_file".into(),
+            arguments: r#"{"path":"Cargo.toml","offset":0,"limit":1}"#.into(),
         };
         assert!(
             denied.call(&call).await.contains("permission denied"),
@@ -594,11 +589,8 @@ mod tests {
         );
         let command = ToolCall {
             id: "command-denied".into(),
-            kind: "function".into(),
-            function: FunctionCall {
-                name: "run_command".into(),
-                arguments: r#"{"program":"printf","args":["ok"]}"#.into(),
-            },
+            name: "run_command".into(),
+            arguments: r#"{"program":"printf","args":["ok"]}"#.into(),
         };
         assert!(denied.call(&command).await.contains("permission denied"));
     }
@@ -620,11 +612,8 @@ mod tests {
         ] {
             let call = ToolCall {
                 id: "test".into(),
-                kind: "function".into(),
-                function: FunctionCall {
-                    name: name.into(),
-                    arguments: arguments.into(),
-                },
+                name: name.into(),
+                arguments: arguments.into(),
             };
             assert!(tools.call(&call).await.starts_with(expected));
         }
