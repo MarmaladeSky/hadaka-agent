@@ -33,8 +33,13 @@
 
       mkPackage = pkgs: pkgs.rustPlatform.buildRustPackage {
         pname = "hadaka-agent";
-        version = "0.1.0";
-        src = ./.;
+        version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+        src = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          filter = path: type:
+            pkgs.lib.cleanSourceFilter path type
+            && !(builtins.elem (builtins.baseNameOf path) [ "target" ".idea" ".agents" ".codex" ]);
+        };
         cargoLock.lockFile = ./Cargo.lock;
 
         nativeCheckInputs = [ pkgs.cacert ];
@@ -51,8 +56,11 @@
       };
     in
     {
-      packages = forAllSystems ({ pkgs }: {
-        default = mkPackage pkgs;
+      packages = forAllSystems ({ pkgs }: let
+        package = mkPackage pkgs;
+      in {
+        hadaka-agent = package;
+        default = package;
       });
 
       apps = forAllSystems ({ pkgs }: let
