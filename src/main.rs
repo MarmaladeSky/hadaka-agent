@@ -28,7 +28,7 @@ use crate::{
     agent::Agent,
     cli::Cli,
     config::Config,
-    model::deepseek::DeepSeek,
+    model::{ModelProvider, deepseek::DeepSeek, llamacpp::LlamaCpp},
     tools::{PermissionPolicy, Tools},
 };
 
@@ -72,6 +72,7 @@ async fn main() -> ExitCode {
 async fn execute(cli: Cli, tools: &mut Tools) -> Result<()> {
     let cli::Cli {
         config,
+        provider: provider_override,
         task,
         format,
         verbose,
@@ -87,13 +88,19 @@ async fn execute(cli: Cli, tools: &mut Tools) -> Result<()> {
     };
     let config = Config::load(&config_path)?;
     let setup_message = format!(
-        "A provider needs to be configured first. Set the DeepSeek provider's api_key and enabled = true in {}.",
+        "A provider needs to be configured first. Configure a provider and set enabled = true (or select it with --provider) in {}.",
         config_path.display()
     );
-    let provider = config.enabled_provider().context(setup_message)?;
-    let model = DeepSeek::new(provider)?;
+    let provider = config
+        .select_provider(provider_override.as_deref())?
+        .context(setup_message)?;
+    let model: Box<dyn ModelProvider> = match provider.provider_name.as_str() {
+        "deepseek" => Box::new(DeepSeek::new(provider)?),
+        "llamacpp" => Box::new(LlamaCpp::new(provider)?),
+        _ => unreachable!("selected provider was validated"),
+    };
     tools.connect(&config.mcp_servers).await?;
-    let mut agent = Agent::new(Box::new(model), config.system_prompt, config.max_turns);
+    let mut agent = Agent::new(model, config.system_prompt, config.max_turns);
     agent
         .run_with_options(&task, tools, &mut std::io::stdout(), format, verbose)
         .await

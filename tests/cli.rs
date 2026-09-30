@@ -173,7 +173,9 @@ fn missing_default_config_is_created() {
     let created = std::fs::read_to_string(path).unwrap();
     let config: toml::Table = toml::from_str(&created).unwrap();
     let providers = config["providers"].as_array().unwrap();
-    assert_eq!(providers.len(), 1);
+    assert_eq!(providers.len(), 2);
+    assert_eq!(providers[1]["provider_name"].as_str(), Some("llamacpp"));
+    assert_eq!(providers[1]["enabled"].as_bool(), Some(false));
     assert_eq!(providers[0]["provider_name"].as_str(), Some("deepseek"));
     assert_eq!(providers[0]["enabled"].as_bool(), Some(false));
     assert_eq!(
@@ -360,4 +362,118 @@ fn mcp_naming_collisions_fail_startup_and_clean_up() {
         ))
         .exists()
     );
+}
+
+#[test]
+fn provider_override_runs_disabled_llamacpp_with_tool_exchange() {
+    use serde_json::{Value, json};
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::TcpListener,
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let dir = config(&format!(
+        "[[providers]]\nprovider_name='llamacpp'\nenabled=false\nmodel='local-agent'\nbase_url='{base}'"
+    ));
+    let server = thread::spawn(move || {
+        for turn in 0..2 {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "no provider request");
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(line, "POST /v1/chat/completions HTTP/1.1\r\n");
+            let mut length = None;
+            loop {
+                line.clear();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                let lower = line.to_ascii_lowercase();
+                assert!(!lower.starts_with("authorization:"));
+                if let Some(value) = lower.strip_prefix("content-length:") {
+                    length = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+            let mut body = vec![0; length.unwrap()];
+            reader.read_exact(&mut body).unwrap();
+            let request: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(request["model"], "local-agent");
+            assert!(request.get("thinking").is_none());
+            let chunk = if turn == 0 {
+                json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"echo","arguments":"{\"text\":\"local hello\"}"}}]},"finish_reason":"tool_calls"}]})
+            } else {
+                assert_eq!(request["messages"][3]["tool_call_id"], "a");
+                assert_eq!(request["messages"][3]["content"], "local hello");
+                json!({"choices":[{"index":0,"delta":{"content":"Local done"},"finish_reason":"stop"}]})
+            };
+            let body = format!("data: {chunk}\n\ndata: [DONE]\n\n");
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+    let output = wait(
+        command(&dir)
+            .args(["--provider", "llamacpp", "use echo"])
+            .spawn()
+            .unwrap(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"Local done\n");
+    server.join().unwrap();
+}
+
+#[test]
+fn provider_selection_errors_precede_mcp_startup() {
+    for (providers, selection, expected) in [
+        (
+            "[[providers]]\nprovider_name='deepseek'\nenabled=false\nmodel='m'\napi_key='key'",
+            Some("llamacpp"),
+            "not configured",
+        ),
+        (
+            "[[providers]]\nprovider_name='llamacpp'\nenabled=false\nmodel='m'\nrequest_timeout_secs=0",
+            Some("llamacpp"),
+            "request_timeout_secs",
+        ),
+        (
+            "[[providers]]\nprovider_name='llamacpp'\nenabled=true\nmodel='m'\n[[providers]]\nprovider_name='deepseek'\nenabled=true\nmodel='m'\napi_key='key'",
+            None,
+            "multiple enabled",
+        ),
+    ] {
+        let dir = config(&format!("{}\n{providers}", mcp_config()));
+        let pid_file = dir.path().join("pid");
+        let mut cmd = command(&dir);
+        cmd.arg("task").env("FIXTURE_PID_FILE", &pid_file);
+        if let Some(selection) = selection {
+            cmd.args(["--provider", selection]);
+        }
+        let output = wait(cmd.spawn().unwrap());
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!pid_file.exists());
+    }
 }

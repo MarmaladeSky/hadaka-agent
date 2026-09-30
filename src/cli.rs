@@ -37,6 +37,9 @@ pub struct Cli {
         help = "Configuration file (default: $XDG_CONFIG_HOME/hadaka-agent/config.toml or ~/.config/hadaka-agent/config.toml)"
     )]
     pub config: Option<PathBuf>,
+    /// Select a configured provider, overriding its enabled flag.
+    #[arg(long, value_parser = ["deepseek", "llamacpp"])]
+    pub provider: Option<String>,
     /// Task to execute.
     #[arg(value_name = "TASK")]
     pub task: String,

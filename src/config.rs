@@ -43,7 +43,10 @@ pub struct Provider {
     pub provider_name: String,
     pub enabled: bool,
     pub model: String,
+    #[serde(default)]
     pub api_key: String,
+    pub base_url: Option<String>,
+    pub request_timeout_secs: Option<u64>,
 }
 
 fn default_system_prompt() -> String {
@@ -106,6 +109,22 @@ impl Config {
         self.providers.iter().find(|provider| provider.enabled)
     }
 
+    pub fn select_provider(&self, name: Option<&str>) -> Result<Option<&Provider>> {
+        let provider = match name {
+            Some(name) => Some(
+                self.providers
+                    .iter()
+                    .find(|p| p.provider_name == name)
+                    .with_context(|| format!("provider `{name}` is not configured"))?,
+            ),
+            None => self.enabled_provider(),
+        };
+        if let Some(provider) = provider {
+            provider.validate_selected()?;
+        }
+        Ok(provider)
+    }
+
     fn validate(&self) -> Result<()> {
         let mut provider_names = HashSet::new();
         for provider in &self.providers {
@@ -118,19 +137,20 @@ impl Config {
                 "duplicate provider_name: {}",
                 provider.provider_name
             );
-            if provider.enabled {
+            if provider.provider_name == "deepseek" {
                 ensure!(
-                    provider.provider_name == "deepseek",
-                    "unsupported provider: {}",
-                    provider.provider_name
-                );
-                ensure!(!provider.model.trim().is_empty(), "model must not be empty");
-                ensure!(
-                    !provider.api_key.trim().is_empty(),
-                    "api_key must not be empty"
+                    provider.base_url.is_none() && provider.request_timeout_secs.is_none(),
+                    "base_url and request_timeout_secs are only supported for llamacpp"
                 );
             }
+            if provider.enabled {
+                provider.validate_selected()?;
+            }
         }
+        ensure!(
+            self.providers.iter().filter(|p| p.enabled).count() <= 1,
+            "multiple enabled providers; enable at most one provider"
+        );
         ensure!(self.max_turns > 0, "max_turns must be greater than zero");
         let mut names = HashSet::new();
         for server in &self.mcp_servers {
@@ -153,122 +173,53 @@ impl Config {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(unix)]
-    #[test]
-    fn creates_config_file_with_owner_only_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        create_if_missing(&path).unwrap();
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-    }
-
-    #[test]
-    fn accepts_the_complete_example() {
-        let config: Config = toml::from_str(include_str!("../agent.example.toml")).unwrap();
-        config.validate().unwrap();
-        assert!(config.mcp_servers.is_empty());
-        assert!(config.enabled_provider().is_none());
-    }
-
-    #[test]
-    fn rejects_duplicate_provider_names_even_when_disabled() {
-        let mut source: toml::Table =
-            toml::from_str(include_str!("../agent.example.toml")).unwrap();
-        let providers = source.get_mut("providers").unwrap().as_array_mut().unwrap();
-        providers.push(providers[0].clone());
-        let config: Config = source.try_into().unwrap();
-        assert!(
-            config
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("duplicate provider_name: deepseek")
+impl Provider {
+    pub fn validate_selected(&self) -> Result<()> {
+        ensure!(
+            matches!(self.provider_name.as_str(), "deepseek" | "llamacpp"),
+            "unsupported provider: {}",
+            self.provider_name
         );
+        ensure!(!self.model.trim().is_empty(), "model must not be empty");
+        if self.provider_name == "deepseek" {
+            ensure!(!self.api_key.trim().is_empty(), "api_key must not be empty");
+            ensure!(
+                self.base_url.is_none() && self.request_timeout_secs.is_none(),
+                "base_url and request_timeout_secs are only supported for llamacpp"
+            );
+        } else {
+            self.llamacpp_endpoint()?;
+            ensure!(
+                self.request_timeout_secs.unwrap_or(600) > 0,
+                "request_timeout_secs must be greater than zero"
+            );
+        }
+        Ok(())
     }
 
-    #[test]
-    fn rejects_unknown_enabled_provider() {
-        let mut config: Config = toml::from_str(include_str!("../agent.example.toml")).unwrap();
-        config.providers[0].provider_name = "other".into();
-        config.providers[0].enabled = true;
-        assert!(
-            config
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("unsupported provider: other")
+    pub fn llamacpp_endpoint(&self) -> Result<String> {
+        let mut url = reqwest::Url::parse(
+            self.base_url
+                .as_deref()
+                .unwrap_or("http://127.0.0.1:8080/v1"),
+        )
+        .map_err(|_| anyhow::anyhow!("invalid llamacpp base_url"))?;
+        ensure!(
+            matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
+            "llamacpp base_url must be an HTTP or HTTPS URL"
         );
-    }
-
-    #[test]
-    fn requires_every_provider_field() {
-        let source: toml::Table = toml::from_str(include_str!("../agent.example.toml")).unwrap();
-        let source = source["providers"].as_array().unwrap()[0]
-            .as_table()
-            .unwrap();
-        for field in ["provider_name", "enabled", "model", "api_key"] {
-            let mut incomplete = source.clone();
-            incomplete.remove(field);
-            let error = toml::from_str::<Provider>(&incomplete.to_string())
-                .err()
-                .unwrap();
-            assert!(
-                error
-                    .to_string()
-                    .contains(&format!("missing field `{field}`")),
-                "{error}"
-            );
-        }
-    }
-
-    #[test]
-    fn requires_every_mcp_field_but_accepts_explicit_empty_values() {
-        let source: toml::Table =
-            toml::from_str("name = 'test'\ncommand = 'server'\nargs = []\nenv = {}").unwrap();
-        let server: McpServer = toml::from_str(&source.to_string()).unwrap();
-        assert!(server.args.is_empty());
-        assert!(server.env.is_empty());
-        for field in ["name", "command", "args", "env"] {
-            let mut incomplete = source.clone();
-            incomplete.remove(field);
-            let error = toml::from_str::<McpServer>(&incomplete.to_string())
-                .err()
-                .unwrap();
-            assert!(
-                error
-                    .to_string()
-                    .contains(&format!("missing field `{field}`")),
-                "{error}"
-            );
-        }
-    }
-
-    #[test]
-    fn validates_explicit_values_and_rejects_unknown_fields() {
-        let source: toml::Table = toml::from_str(include_str!("../agent.example.toml")).unwrap();
-        for (field, value) in [
-            ("max_turns", toml::Value::Integer(0)),
-            ("model", toml::Value::String(String::new())),
-            (
-                "base_url",
-                toml::Value::String("http://localhost/v1".into()),
-            ),
-            ("provider", toml::Value::String("other".into())),
-        ] {
-            let mut invalid = source.clone();
-            invalid.insert(field.into(), value);
-            let parsed = toml::from_str::<Config>(&invalid.to_string());
-            assert!(
-                parsed
-                    .and_then(|c| c.validate().map_err(serde::de::Error::custom))
-                    .is_err()
-            );
-        }
+        ensure!(
+            url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "llamacpp base_url must not contain credentials, query strings, or fragments"
+        );
+        let path = format!("{}/chat/completions", url.path().trim_end_matches('/'));
+        url.set_path(&path);
+        Ok(url.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests;

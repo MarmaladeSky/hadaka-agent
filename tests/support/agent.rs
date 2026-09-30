@@ -40,6 +40,10 @@ struct Mock {
 
 impl Mock {
     fn start(replies: Vec<String>) -> Self {
+        Self::start_with(replies, false, true)
+    }
+
+    fn start_with(replies: Vec<String>, llama: bool, auth: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let endpoint = endpoint(&listener);
@@ -47,7 +51,8 @@ impl Mock {
         let thread = thread::spawn(move || {
             for reply in replies {
                 let mut stream = accept(&listener);
-                tx.send(read_request(&mut stream)).unwrap();
+                tx.send(read_provider_request(&mut stream, llama, auth))
+                    .unwrap();
                 for fragment in reply.as_bytes().chunks(7) {
                     if stream.write_all(fragment).is_err() {
                         break;
@@ -119,12 +124,24 @@ fn accept(listener: &TcpListener) -> TcpStream {
 }
 
 fn read_request(stream: &mut TcpStream) -> Value {
+    read_provider_request(stream, false, true)
+}
+
+fn read_provider_request(stream: &mut TcpStream, llama: bool, auth: bool) -> Value {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
-    assert_eq!(line, "POST /chat/completions HTTP/1.1\r\n");
+    assert_eq!(
+        line,
+        if llama {
+            "POST /proxy/v1/chat/completions HTTP/1.1\r\n"
+        } else {
+            "POST /chat/completions HTTP/1.1\r\n"
+        }
+    );
     let mut length = None;
     let mut authenticated = false;
+    let mut has_auth_header = false;
     loop {
         line.clear();
         assert!(reader.read_line(&mut line).unwrap() > 0);
@@ -135,17 +152,39 @@ fn read_request(stream: &mut TcpStream) -> Value {
         if let Some(value) = lower.strip_prefix("content-length:") {
             length = Some(value.trim().parse::<usize>().unwrap());
         }
+        if lower.starts_with("authorization:") {
+            has_auth_header = true;
+        }
         if lower == "authorization: bearer test-key\r\n" {
             authenticated = true;
         }
     }
-    assert!(authenticated, "expected DeepSeek API key header");
+    assert_eq!(authenticated, auth);
+    assert_eq!(has_auth_header, auth);
     let mut body = vec![0; length.unwrap()];
     reader.read_exact(&mut body).unwrap();
     let request: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(request["stream"], true);
-    assert_eq!(request["model"], "deepseek-flash");
-    assert_eq!(request["thinking"]["type"], "disabled");
+    assert_eq!(
+        request["model"],
+        if llama {
+            "local-agent"
+        } else {
+            "deepseek-flash"
+        }
+    );
+    if llama {
+        for field in [
+            "thinking",
+            "parallel_tool_calls",
+            "temperature",
+            "reasoning_effort",
+        ] {
+            assert!(request.get(field).is_none());
+        }
+    } else {
+        assert_eq!(request["thinking"]["type"], "disabled");
+    }
     request
 }
 
@@ -571,4 +610,118 @@ async fn mcp_discovers_pages_routes_calls_and_reaps_subprocess() {
         ))
         .exists()
     );
+}
+
+fn llama_agent(mock: &Mock, key: &str) -> Agent {
+    let base_url = mock.endpoint.replace("/chat/completions", "/proxy/v1/");
+    let provider: crate::config::Provider = toml::from_str(&format!(
+        "provider_name = 'llamacpp'\nenabled = false\nmodel = 'local-agent'\nbase_url = '{base_url}'\napi_key = '{key}'\n"
+    )).unwrap();
+    Agent::new(
+        Box::new(crate::model::llamacpp::LlamaCpp::new(&provider).unwrap()),
+        "test".into(),
+        3,
+    )
+}
+
+#[tokio::test]
+async fn llamacpp_auth_streaming_and_tool_round_trip() {
+    for key in ["", "test-key"] {
+        let mock = Mock::start_with(
+            vec![
+                calls(vec![("local-call", "echo", r#"{"text":"hello 世界"}"#)]),
+                answer("Done 世界"),
+            ],
+            true,
+            !key.is_empty(),
+        );
+        let mut output = Vec::new();
+        llama_agent(&mock, key)
+            .run_with_options(
+                "task",
+                &Tools::new(),
+                &mut output,
+                OutputFormat::Human,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output, "Done 世界\n".as_bytes());
+        let requests = mock.finish();
+        assert_eq!(requests[0]["tool_choice"], "auto");
+        assert_eq!(requests[1]["messages"][3]["tool_call_id"], "local-call");
+        assert_eq!(requests[1]["messages"][3]["content"], "hello 世界");
+    }
+}
+
+#[tokio::test]
+async fn llamacpp_rejects_http_errors_and_incomplete_streams() {
+    for (reply, expected) in [
+        (http("data: not-json\n\n"), "invalid JSON"),
+        (
+            http(&event(json!({"content":"partial"}), None)),
+            "missing [DONE]",
+        ),
+        (http("data: [DONE]\n\n"), "missing finish_reason"),
+        (
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n".into(),
+            "401",
+        ),
+        (
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n".into(),
+            "503",
+        ),
+        (
+            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1\r\nContent-Length: 0\r\n\r\n"
+                .into(),
+            "302",
+        ),
+    ] {
+        let mock = Mock::start_with(vec![reply], true, false);
+        let error = llama_agent(&mock, "")
+            .run_with_options(
+                "task",
+                &Tools::new(),
+                &mut Vec::new(),
+                OutputFormat::Human,
+                false,
+            )
+            .await
+            .unwrap_err();
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("llama.cpp") && error.contains(expected),
+            "{error}"
+        );
+        assert_eq!(mock.finish().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn llamacpp_request_timeout_is_enforced() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let _stream = accept(&listener);
+        thread::sleep(Duration::from_millis(1300));
+    });
+    let provider = toml::from_str(&format!("provider_name='llamacpp'\nenabled=true\nmodel='local-agent'\nbase_url='{base}'\nrequest_timeout_secs=1")).unwrap();
+    let mut agent = Agent::new(
+        Box::new(crate::model::llamacpp::LlamaCpp::new(&provider).unwrap()),
+        "test".into(),
+        1,
+    );
+    let error = agent
+        .run_with_options(
+            "task",
+            &Tools::new(),
+            &mut Vec::new(),
+            OutputFormat::Human,
+            false,
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+    server.join().unwrap();
 }

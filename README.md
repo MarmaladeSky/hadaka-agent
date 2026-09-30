@@ -36,6 +36,17 @@ With Nix:
 nix run github:MarmaladeSky/hadaka-agent -- --allow-read ./ "Read Cargo.toml and report its package version."
 ```
 
+## Why
+
+The main motivation behind this project is my lack of trust in existing agentic
+runtimes. They are either closed ecosystems or absolutely impossible to review
+due to their enormous codebases and extensive feature sets.
+
+Here I want to build a simple agentic runtime that:
+
+- has strict access controls built in
+- is still small enough to be manually reviewed
+
 ## FAQ
 
 ### Was it vibe-coded?

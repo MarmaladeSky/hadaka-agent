@@ -20,31 +20,25 @@ use anyhow::Result;
 use futures_util::future::LocalBoxFuture;
 use std::time::Duration;
 
-pub struct DeepSeek {
+pub struct LlamaCpp {
     client: ChatCompletions,
 }
-impl DeepSeek {
+impl LlamaCpp {
     pub fn new(config: &Provider) -> Result<Self> {
         config.validate_selected()?;
         Ok(Self {
             client: ChatCompletions::new(
-                "https://api.deepseek.com/chat/completions".into(),
+                config.llamacpp_endpoint()?,
                 config.model.clone(),
                 config.api_key.clone(),
-                Duration::from_secs(120),
-                "DeepSeek",
-                serde_json::from_value(serde_json::json!({"thinking":{"type":"disabled"}}))?,
+                Duration::from_secs(config.request_timeout_secs.unwrap_or(600)),
+                "llama.cpp",
+                Default::default(),
             )?,
         })
     }
-    #[cfg(test)]
-    pub fn for_test(config: &Provider, endpoint: String) -> Result<Self> {
-        let mut provider = Self::new(config)?;
-        provider.client.endpoint = endpoint;
-        Ok(provider)
-    }
 }
-impl ModelProvider for DeepSeek {
+impl ModelProvider for LlamaCpp {
     fn respond<'a>(
         &'a self,
         messages: &'a [Message],

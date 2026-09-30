@@ -1,5 +1,5 @@
-# DeepSeek is the only supported provider. Set a real api_key and enabled = true.
-# The endpoint is fixed to https://api.deepseek.com/chat/completions.
+# Enable at most one provider by default, or select a configured entry with --provider.
+# DeepSeek requires an api_key; its endpoint is fixed to https://api.deepseek.com/chat/completions.
 system_prompt = "You are executing a single non-interactive task. Use the available tools when needed. Complete the task and return the final result. Do not ask follow-up questions, request confirmation or permissions, suggest that the user proceed, or say that you will wait. If the task cannot be completed, report the concrete reason briefly and stop."
 max_turns = 20
 mcp_servers = []
@@ -9,6 +9,15 @@ provider_name = "deepseek"
 enabled = false
 model = "deepseek-flash"
 api_key = "invalid-placeholder-key"
+
+# Run llama-server separately with a tool-capable model and --alias local-agent --jinja.
+[[providers]]
+provider_name = "llamacpp"
+enabled = false
+model = "local-agent"
+base_url = "http://127.0.0.1:8080/v1" # Optional; this is the default.
+request_timeout_secs = 600 # Optional; whole-request timeout, greater than zero.
+# api_key = "optional-server-key"
 
 # To connect local MCP servers, remove mcp_servers = [] and add entries below.
 # Every field is required; use args = [] and env = {} when empty.

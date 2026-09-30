@@ -16,7 +16,9 @@ use anyhow::Result;
 use futures_util::future::LocalBoxFuture;
 use serde_json::Value;
 
+mod chat_completions;
 pub mod deepseek;
+pub mod llamacpp;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {

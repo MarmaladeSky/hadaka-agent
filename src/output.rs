@@ -274,35 +274,4 @@ fn human_json_value(value: &serde_json::Value, depth: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn empty_deltas_and_answers_preserve_output_shape() {
-        for format in [OutputFormat::Human, OutputFormat::Json] {
-            for verbose in [false, true] {
-                let (mut output, mut diagnostics) = (Vec::new(), Vec::new());
-                let mut renderer = Renderer {
-                    output: &mut output,
-                    diagnostics: &mut diagnostics,
-                    format,
-                    verbose,
-                };
-                renderer.emit(AgentEvent::Text("")).unwrap();
-                renderer
-                    .emit(AgentEvent::AssistantComplete(&AssistantTurn::default()))
-                    .unwrap();
-                renderer.emit(AgentEvent::Complete("")).unwrap();
-                if matches!(format, OutputFormat::Json) && !verbose {
-                    assert_eq!(
-                        serde_json::from_slice::<Value>(&output).unwrap(),
-                        json!({"type":"result", "text":""})
-                    );
-                } else {
-                    assert!(output.is_empty());
-                }
-                assert!(diagnostics.is_empty());
-            }
-        }
-    }
-}
+mod tests;
